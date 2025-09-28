@@ -1,11 +1,4 @@
-# app.py — ⭐️ Rate My (Stock + Portfolio)
-# - Welcome page with centered buttons
-# - Back button (top-right)
-# - Stock: centered ticker, auto status, green banner (Peers + Benchmark + Peer set),
-#          main KPIs (Fundamentals, Technicals, Macro), detailed “Why this rating”,
-#          per-ticker CSV/XLSX download + “download all”
-# - Portfolio: currency + total value, % <-> amount auto-sync (Auto/Percent->Amount/Amount->Percent),
-#              diversification explained, KPIs, charts
+# app.py — ⭐ Rate My (Stock + Portfolio) — full build with charts, macro explanations, exports, and bug-fixed editor
 
 import io
 import time
@@ -34,12 +27,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------- Session --------------------
-for k, v in {
-    "entered": False,
-    "mode": None,       # 'stock' | 'portfolio'
-    "grid_df": None,
-    "prev_grid_df": None
-}.items():
+for k, v in {"entered": False, "mode": None, "grid_df": None, "prev_grid_df": None}.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -252,6 +240,30 @@ def topbar_back(key):
     st.button("← Back", key=key, on_click=go_home)
     st.markdown('</div>', unsafe_allow_html=True)
 
+# ======== STOCK CHARTS ========
+def draw_stock_charts(t: str, series: pd.Series):
+    st.markdown("### 📈 Charts")
+    if series is None or series.empty:
+        st.info("Not enough history to show charts.")
+        return
+
+    # Price + EMAs
+    e20, e50, e100 = ema(series,20), ema(series,50), ema(series,100)
+    price_df = pd.DataFrame({"Close": series, "EMA20": e20, "EMA50": e50, "EMA100": e100})
+    st.line_chart(price_df)
+
+    # MACD
+    line, sig, hist = macd(series)
+    st.line_chart(pd.DataFrame({"MACD line": line, "Signal": sig}))
+    st.bar_chart(pd.DataFrame({"Histogram": hist}))
+
+    # RSI
+    st.line_chart(pd.DataFrame({"RSI(14)": rsi(series)}))
+
+    # 12m momentum
+    mom12 = series/series.shift(253)-1.0
+    st.line_chart(pd.DataFrame({"12m momentum": mom12}))
+
 # =============== STOCK APP ===============
 def app_stock():
     topbar_back("back_stock")
@@ -320,11 +332,11 @@ def app_stock():
 
         status.update(label="Assessing macro regime…")
         vix_series = fetch_vix_series(period="6mo", interval="1d")
-        MACRO, vix_last, vix_ema, vix_gap = macro_from_vix(vix_series)
+        MACRO, vix_last, vix_ema20, vix_gap = macro_from_vix(vix_series)
         prog.progress(100)
         status.update(label="Done!", state="complete")
 
-    # Banner (no VIX value here)
+    # Banner (no VIX number here)
     peers_loaded = len(panel)
     st.markdown(f'<div class="banner">Peers loaded: <b>{peers_loaded}</b> &nbsp;|&nbsp; '
                 f'Benchmark: <b>{bench}</b> &nbsp;|&nbsp; Peer set: <b>{label}</b></div>',
@@ -355,7 +367,7 @@ def app_stock():
     st.dataframe(pretty.round(4), use_container_width=True)
 
     st.markdown("## 🔎 Why this rating?")
-    all_rows = []  # to build "download all"
+    all_rows = []  # for "download all"
     for t in show_idx:
         reco = table.loc[t,"RECO"]; sc = table.loc[t,"RATING_0_100"]
         with st.expander(f"{t} — {reco} (Score: {sc:.1f})", expanded=True):
@@ -400,14 +412,35 @@ def app_stock():
             else:
                 st.info("Not enough price history for technicals.")
 
-            # Macro detail
-            st.markdown("#### Macro (VIX)")
+            # Macro detail (with interpretation)
+            st.markdown("#### Macro (VIX) — level & trend")
             if not np.isnan(vix_last):
                 m1,m2,m3 = st.columns(3)
                 m1.metric("VIX (last)", f"{vix_last:.2f}")
-                m2.metric("VIX EMA20", f"{vix_ema:.2f}")
+                m2.metric("VIX EMA20", f"{vix_ema20:.2f}")
                 m3.metric("Gap vs EMA20", f"{(vix_gap*100):.1f}%")
-                st.caption("Macro score blends VIX level (low calmer) and trend vs EMA20 (rising = risk building).")
+                # Interpretation
+                if vix_last <= 13:
+                    level_txt = "very calm"
+                elif vix_last <= 18:
+                    level_txt = "calm"
+                elif vix_last <= 24:
+                    level_txt = "elevated"
+                else:
+                    level_txt = "stressed"
+
+                if vix_gap > 0.03:
+                    trend_txt = "rising above trend (risk building)"
+                elif vix_gap < -0.03:
+                    trend_txt = "falling below trend (risk easing)"
+                else:
+                    trend_txt = "near trend"
+
+                st.markdown(f"- **Level** suggests **{level_txt}** conditions. "
+                            f"**Trend** is **{trend_txt}**. "
+                            "A higher Macro score reflects calmer levels and/or easing trend.")
+            else:
+                st.info("VIX unavailable — Macro defaults to a neutral value.")
 
             # ---------- Export: this ticker ----------
             row = {
@@ -419,7 +452,7 @@ def app_stock():
                 "score_0_100":        float(table.loc[t, "RATING_0_100"]),
                 "recommendation":     str(table.loc[t, "RECO"]),
                 "vix_last": float(vix_last) if not np.isnan(vix_last) else np.nan,
-                "vix_ema20": float(vix_ema) if not np.isnan(vix_ema) else np.nan,
+                "vix_ema20": float(vix_ema20) if not np.isnan(vix_ema20) else np.nan,
                 "vix_gap_vs_ema": float(vix_gap) if not np.isnan(vix_gap) else np.nan,
             }
             for col in [
@@ -453,6 +486,10 @@ def app_stock():
                 use_container_width=True,
             )
 
+            # Stock charts (price+EMAs, MACD, RSI, momentum)
+            if t in panel:
+                draw_stock_charts(t, panel[t])
+
             all_rows.append(row)
 
     # ---------- Export: all shown tickers ----------
@@ -482,18 +519,36 @@ CURRENCY_MAP = {"$":"USD","€":"EUR","£":"GBP","CHF":"CHF","C$":"CAD","A$":"AU
 
 def _safe_num(x): return pd.to_numeric(x, errors="coerce")
 
-def detect_change_side(prev_df, curr_df):
-    if prev_df is None or prev_df.empty:
-        return "none"
-    a_prev=_safe_num(prev_df.get("Amount")); a_curr=_safe_num(curr_df.get("Amount"))
-    p_prev=_safe_num(prev_df.get("Percent (%)")); p_curr=_safe_num(curr_df.get("Percent (%)"))
-    n=max(len(a_prev or []), len(a_curr or []), len(p_prev or []), len(p_curr or []))
-    a_prev=a_prev.reindex(range(n)); a_curr=a_curr.reindex(range(n))
-    p_prev=p_prev.reindex(range(n)); p_curr=p_curr.reindex(range(n))
-    d_amt=(a_curr.fillna(0)-a_prev.fillna(0)).abs().sum()
-    d_pct=(p_curr.fillna(0)-p_prev.fillna(0)).abs().sum()
-    if d_amt>d_pct and d_amt>0: return "amount"
-    if d_pct>d_amt and d_pct>0: return "percent"
+# >>> FIXED: robust change detection (no Series truth-value errors)
+def detect_change_side(prev_df: pd.DataFrame, curr_df: pd.DataFrame) -> str:
+    """
+    Decide which side changed more between prev and curr:
+    returns "amount", "percent" or "none".
+    Robust to missing columns and different lengths.
+    """
+    def col(df, name):
+        if df is None or not isinstance(df, pd.DataFrame) or name not in df.columns:
+            return pd.Series(dtype=float)
+        return pd.to_numeric(df[name], errors="coerce")
+
+    a_prev = col(prev_df, "Amount")
+    a_curr = col(curr_df, "Amount")
+    p_prev = col(prev_df, "Percent (%)")
+    p_curr = col(curr_df, "Percent (%)")
+
+    n = max(len(a_prev), len(a_curr), len(p_prev), len(p_curr), 1)
+    idx = pd.RangeIndex(n)
+
+    a_prev = a_prev.reindex(idx).fillna(0.0)
+    a_curr = a_curr.reindex(idx).fillna(0.0)
+    p_prev = p_prev.reindex(idx).fillna(0.0)
+    p_curr = p_curr.reindex(idx).fillna(0.0)
+
+    d_amt = (a_curr - a_prev).abs().sum()
+    d_pct = (p_curr - p_prev).abs().sum()
+
+    if d_amt > d_pct and d_amt > 0: return "amount"
+    if d_pct > d_amt and d_pct > 0: return "percent"
     return "none"
 
 def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFrame:
@@ -509,7 +564,10 @@ def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFra
     drive=mode
     if mode=="auto":
         prev=st.session_state.get("prev_grid_df")
-        side=detect_change_side(prev, df)
+        try:
+            side=detect_change_side(prev, df)
+        except Exception:
+            side="none"
         if side=="none":
             if has_total and df["Amount"].fillna(0).sum()>0: drive="amount"
             elif df["Percent (%)"].fillna(0).sum()>0: drive="percent"
@@ -519,8 +577,7 @@ def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFra
 
     if has_total:
         if drive=="percent":
-            if df["Percent (%)"].fillna(0).sum()==0:
-                df["Percent (%)"]=100.0/n
+            if df["Percent (%)"].fillna(0).sum()==0: df["Percent (%)"]=100.0/n
             df["Amount"]=(df["Percent (%)"].fillna(0)/100.0*total).round(2)
         else:
             s=df["Amount"].fillna(0).sum()
@@ -651,7 +708,7 @@ def app_portfolio():
         MACRO, _, _, _ = macro_from_vix(vix_series)
         prog.progress(100); status.update(label="Done!", state="complete")
 
-    # Banner (no VIX number)
+    # Banner
     st.markdown(f'<div class="banner">Peers loaded: <b>{len(panel_all)}</b> &nbsp;|&nbsp; '
                 f'Benchmark: <b>{bench}</b> &nbsp;|&nbsp; Peer set: <b>{label}</b></div>', unsafe_allow_html=True)
 
@@ -715,14 +772,17 @@ def app_portfolio():
         st.dataframe(show.round(4), use_container_width=True)
         st.markdown("**Diversification explained**")
         st.markdown(
-            f"- **Sector diversity score**: {sector_div:.2f} (effective number of sectors ≈ {effN:.1f}).\n"
-            f"- **Name concentration**: max single-name weight ≈ {max_w*100:.1f}% → score {name_div:.2f}.\n"
-            f"- **Correlation diversity**: average pairwise correlation ≈ "
-            f"{('%.2f' % avg_corr) if not np.isnan(avg_corr) else 'N/A'} → score {corr_div:.2f}.\n"
-            f"- Final diversification score = 50% sector + 30% correlation + 20% name concentration."
+            f"- **Sector HHI** converts to an effective number of sectors ≈ {effN:.1f}. "
+            f"More sectors → higher score (your sector diversity score = {sector_div:.2f}).\n"
+            f"- **Name concentration**: your largest position ≈ {max_w*100:.1f}%. "
+            f"Lower concentration is better (score = {name_div:.2f}).\n"
+            f"- **Correlation**: average pairwise correlation ≈ "
+            f"{('%.2f' % avg_corr) if not np.isnan(avg_corr) else 'N/A'}. "
+            f"Lower correlation improves diversification (score = {corr_div:.2f}).\n"
+            f"- **Diversification score** = 50% sector + 30% correlation + 20% name concentration."
         )
 
-    # Simple charts
+    # Charts
     px_held = prices[tickers].dropna(how="all")
     r = px_held.pct_change().fillna(0)
     w_vec = weights.reindex(px_held.columns).fillna(0).values
