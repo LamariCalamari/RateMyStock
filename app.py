@@ -1,4 +1,6 @@
-# app.py — Rate My Stock (with selectable/auto peer universe + explainable breakdowns)
+# app.py — ⭐️ Rate My Stock
+# Full app with selectable/auto peer universe, sampling, chunked downloads,
+# explainable breakdowns, CSV/XLSX export, and local Excel save.
 
 import io, os, time, datetime
 import numpy as np
@@ -9,7 +11,7 @@ import yfinance as yf
 # ---------------- Page ----------------
 st.set_page_config(page_title="Rate My Stock", layout="wide")
 st.title("⭐️ Rate My Stock")
-st.caption("Pick a stock, pick a squad (peer universe), and get a vibe-checked rating with full receipts.")
+st.caption("Pick a stock, pick a squad (peer universe), and get a vibe-checked rating — with receipts for every component.")
 
 # ------------- Helpers / Math ----------
 def zscore_series(s: pd.Series) -> pd.Series:
@@ -48,22 +50,38 @@ def macro_overlay_score(vix: float) -> float:
 
 # ----------- Data Fetchers (cached) ----
 @st.cache_data(show_spinner=False)
-def fetch_prices_per_ticker(tickers, period="2y", interval="1d", max_retries=3, sleep_s=0.6):
+def fetch_prices_chunked(tickers, period="2y", interval="1d", chunk=50):
+    """Chunked multi-download to reduce rate limits; returns wide Close matrix."""
+    tickers = list(dict.fromkeys([t for t in tickers if t]))  # unique & clean
     frames, ok, fail = [], [], []
-    for t in tickers:
-        done = False
-        for k in range(max_retries):
-            try:
-                df = yf.Ticker(t).history(period=period, interval=interval, auto_adjust=True)
-                if not df.empty and "Close" in df.columns:
-                    frames.append(df["Close"].rename(t))
-                    ok.append(t)
-                    done = True
-                    break
-            except Exception:
-                pass
-            time.sleep(sleep_s*(k+1))
-        if not done: fail.append(t)
+    for i in range(0, len(tickers), chunk):
+        group = tickers[i:i+chunk]
+        try:
+            df = yf.download(
+                " ".join(group), period=period, interval=interval,
+                auto_adjust=True, group_by="ticker", threads=True, progress=False
+            )
+            if isinstance(df.columns, pd.MultiIndex):
+                got = set(df.columns.get_level_values(0))
+                for t in group:
+                    if t in got:
+                        s = df[t]["Close"].dropna()
+                        if s.size:
+                            frames.append(s.rename(t)); ok.append(t)
+                        else:
+                            fail.append(t)
+                    else:
+                        fail.append(t)
+            else:
+                # group of 1 returns flat columns
+                if "Close" in df:
+                    t = group[0]
+                    s = df["Close"].dropna()
+                    if s.size: frames.append(s.rename(t)); ok.append(t)
+                    else: fail.append(t)
+        except Exception:
+            fail.extend(group)
+        time.sleep(0.2)
     prices = pd.concat(frames, axis=1).sort_index() if frames else pd.DataFrame()
     return prices, ok, fail
 
@@ -88,36 +106,30 @@ def fetch_vix_level() -> float:
 
 @st.cache_data(show_spinner=False)
 def fetch_fundamentals(tickers):
+    """Best-effort fundamentals for cross-sectional scoring."""
     rows = []
     for t in tickers:
         try:
             tk = yf.Ticker(t)
-            try:
-                inf = tk.info or {}
-            except Exception:
-                inf = {}
-            try:
-                fin = tk.financials
-            except Exception:
-                fin = None
-            try:
-                bs = tk.balance_sheet
-            except Exception:
-                bs = None
+            try: inf = tk.info or {}
+            except Exception: inf = {}
+            try: fin = tk.financials
+            except Exception: fin = None
+            try: bs  = tk.balance_sheet
+            except Exception: bs  = None
 
             pe = inf.get("trailingPE", np.nan)
             ev = inf.get("enterpriseValue", np.nan)
 
             ebitda = np.nan
-            total_revenue_recent = total_revenue_prev = np.nan
-            net_income_recent = net_income_prev = np.nan
+            tot_rev_recent = tot_rev_prev = np.nan
+            net_inc_recent = net_inc_prev = np.nan
             if fin is not None and not fin.empty:
                 try:
                     s = fin.loc[fin.index.str.contains("EBITDA", case=False)].T.squeeze().dropna()
                     ebitda = float(s.iloc[0]) if len(s) else np.nan
                 except Exception:
                     pass
-
                 def latest_two(name):
                     try:
                         s = fin.loc[fin.index.str.contains(name, case=False)].T.squeeze().dropna()
@@ -125,23 +137,23 @@ def fetch_fundamentals(tickers):
                                 float(s.iloc[1]) if len(s) > 1 else np.nan)
                     except Exception:
                         return (np.nan, np.nan)
-                total_revenue_recent, total_revenue_prev = latest_two("Total Revenue")
-                net_income_recent, net_income_prev     = latest_two("Net Income")
+                tot_rev_recent, tot_rev_prev = latest_two("Total Revenue")
+                net_inc_recent, net_inc_prev = latest_two("Net Income")
 
             ev_ebitda = np.nan
             if pd.notna(ev) and pd.notna(ebitda) and ebitda not in (0, None):
                 ev_ebitda = ev / ebitda
 
             rev_growth = np.nan
-            if pd.notna(total_revenue_recent) and pd.notna(total_revenue_prev) and total_revenue_prev != 0:
-                rev_growth = total_revenue_recent / total_revenue_prev - 1.0
+            if pd.notna(tot_rev_recent) and pd.notna(tot_rev_prev) and tot_rev_prev != 0:
+                rev_growth = tot_rev_recent / tot_rev_prev - 1.0
 
             eps_growth = np.nan
             shares_out = inf.get("sharesOutstanding", np.nan)
             if (pd.notna(shares_out) and shares_out not in (0, None)
-                and pd.notna(net_income_recent) and pd.notna(net_income_prev) and net_income_prev != 0):
-                eps_recent = net_income_recent / shares_out
-                eps_prev   = net_income_prev / shares_out
+                and pd.notna(net_inc_recent) and pd.notna(net_inc_prev) and net_inc_prev != 0):
+                eps_recent = net_inc_recent / shares_out
+                eps_prev   = net_inc_prev / shares_out
                 if pd.notna(eps_recent) and pd.notna(eps_prev) and eps_prev != 0:
                     eps_growth = eps_recent / eps_prev - 1.0
 
@@ -149,29 +161,27 @@ def fetch_fundamentals(tickers):
             total_equity = np.nan; total_liab = np.nan
             if bs is not None and not bs.empty:
                 try:
-                    eq = bs.loc[bs.index.str_contains("Total Stockholder", case=False)].T.squeeze().dropna()
+                    eq = bs.loc[bs.index.str.contains("Total Stockholder", case=False)].T.squeeze().dropna()
                     total_equity = float(eq.iloc[0]) if len(eq) else np.nan
-                except Exception:
-                    pass
+                except Exception: pass
                 try:
-                    li = bs.loc[bs.index.str_contains("Total Liabilities", case=False)].T.squeeze().dropna()
+                    li = bs.loc[bs.index.str.contains("Total Liabilities", case=False)].T.squeeze().dropna()
                     total_liab = float(li.iloc[0]) if len(li) else np.nan
-                except Exception:
-                    pass
-                if pd.notna(net_income_recent) and pd.notna(total_equity) and total_equity != 0:
-                    roe = net_income_recent / total_equity
+                except Exception: pass
+                if pd.notna(net_inc_recent) and pd.notna(total_equity) and total_equity != 0:
+                    roe = net_inc_recent / total_equity
                 if pd.notna(total_liab) and pd.notna(total_equity) and total_equity != 0:
                     de_ratio = total_liab / total_equity
 
             net_margin = np.nan; gross_margin = np.nan
-            if pd.notna(net_income_recent) and pd.notna(total_revenue_recent) and total_revenue_recent != 0:
-                net_margin = net_income_recent / total_revenue_recent
+            if pd.notna(net_inc_recent) and pd.notna(tot_rev_recent) and tot_rev_recent != 0:
+                net_margin = net_inc_recent / tot_rev_recent
             try:
                 gp = fin.loc[fin.index.str.contains("Gross Profit", case=False)].T.squeeze().dropna() if fin is not None and not fin.empty else pd.Series(dtype=float)
                 if len(gp):
                     gp_recent = float(gp.iloc[0])
-                    if pd.notna(gp_recent) and pd.notna(total_revenue_recent) and total_revenue_recent != 0:
-                        gross_margin = gp_recent / total_revenue_recent
+                    if pd.notna(gp_recent) and pd.notna(tot_rev_recent) and tot_rev_recent != 0:
+                        gross_margin = gp_recent / tot_rev_recent
             except Exception:
                 pass
 
@@ -210,7 +220,8 @@ def rolling_beta_alpha(stock_px: pd.Series, bench_px: pd.Series, window: int = 6
     out = []
     for i in range(window, len(df)):
         chunk = df.iloc[i-window:i]
-        if chunk["r_b"].std(ddof=0) == 0: beta = np.nan
+        if chunk["r_b"].std(ddof=0) == 0:
+            beta = np.nan
         else:
             cov = np.cov(chunk["r_s"], chunk["r_b"])[0,1]
             beta = cov / np.var(chunk["r_b"])
@@ -241,27 +252,30 @@ def list_dow30():
     try: return set(yf.tickers_dow())
     except Exception: return set()
 
-def build_universe(user_tickers, mode, custom_raw=""):
-    user_tickers = [t for t in user_tickers if t]  # clean
+def build_universe(user_tickers, mode, custom_raw="", sample_n=60):
+    """Return user + sampled peers for cross-sectional scoring."""
+    user_tickers = [t for t in user_tickers if t]
     if mode == "S&P 500":
-        return sorted(set(user_tickers) | list_sp500())
-    if mode == "Dow 30":
-        return sorted(set(user_tickers) | list_dow30())
-    if mode == "Custom (paste list)":
-        custom = [t.strip().upper() for t in custom_raw.split(",") if t.strip()]
-        return sorted(set(user_tickers) | set(custom))
-    if mode == "User list only":
+        peers_all = list_sp500()
+    elif mode == "Dow 30":
+        peers_all = list_dow30()
+    elif mode == "User list only":
         return user_tickers
-    # Auto by index membership
-    sp = list_sp500()
-    dj = list_dow30()
-    auto_peers = set()
-    for t in user_tickers:
-        if t in sp: auto_peers |= sp
-        elif t in dj: auto_peers |= dj
-    if not auto_peers:  # default peer set when unknown
-        auto_peers = sp if sp else dj
-    return sorted(set(user_tickers) | auto_peers)
+    elif mode == "Custom (paste list)":
+        custom = {t.strip().upper() for t in custom_raw.split(",") if t.strip()}
+        return sorted(set(user_tickers) | custom)
+    else:  # Auto by index membership
+        sp, dj = list_sp500(), list_dow30()
+        auto = set()
+        for t in user_tickers:
+            if t in sp: auto |= sp
+            elif t in dj: auto |= dj
+        peers_all = auto if auto else (sp or dj)
+
+    peers = sorted(peers_all.difference(set(user_tickers)))
+    if len(peers) > sample_n:
+        peers = peers[:sample_n]  # deterministic sample
+    return sorted(set(user_tickers) | set(peers))
 
 # -------------- Sidebar -----------------
 st.sidebar.header("⚙️ Settings")
@@ -274,6 +288,7 @@ universe_mode = st.sidebar.selectbox(
     ["Auto by index membership", "S&P 500", "Dow 30", "User list only", "Custom (paste list)"],
     index=0
 )
+peer_sample_n = st.sidebar.slider("Peer sample size (for speed)", 20, 150, 60, 10)
 custom_universe_raw = ""
 if universe_mode == "Custom (paste list)":
     custom_universe_raw = st.sidebar.text_area("Paste custom peers (comma-separated):", "AMD, AVGO, CRM, COST, NFLX")
@@ -315,22 +330,27 @@ run_btn = st.sidebar.button("🚀 Rate it!")
 
 # -------------- Main flow ---------------
 if run_btn:
-    # Universe
-    universe_tickers = build_universe(user_tickers, universe_mode, custom_universe_raw)
+    # Universe (user + sampled peers)
+    universe_tickers = build_universe(user_tickers, universe_mode, custom_universe_raw, peer_sample_n)
     if not universe_tickers:
         st.error("Please enter at least one ticker.")
         st.stop()
 
-    # Prices (universe)
+    # Prices (chunked multi-download)
     with st.spinner("Downloading prices for peer universe..."):
-        prices, ok, fail = fetch_prices_per_ticker(universe_tickers, period=history, interval="1d")
-    price_panel = {t: prices[t].dropna() for t in ok if t in prices.columns and prices[t].dropna().size > 0}
+        prices, ok, fail = fetch_prices_chunked(universe_tickers, period=history, interval="1d")
+    price_panel = {t: prices[t].dropna() for t in ok if t in prices and prices[t].dropna().size > 0}
+    peer_loaded = len(price_panel)
+    if peer_loaded < 5:
+        st.warning(f"Only {peer_loaded} tickers loaded (rate limits or long history). "
+                   f"Try a larger sample size or a shorter history window.")
+    skipped_user = [t for t in user_tickers if t not in price_panel]
+    if skipped_user:
+        st.info(f"Skipped (no price data): {', '.join(skipped_user)}")
+
     if not price_panel:
         st.error("No valid price data downloaded.")
         st.stop()
-    skipped_user = [t for t in user_tickers if t not in price_panel]
-    if skipped_user:
-        st.info(f"Skipped (no data): {', '.join(skipped_user)}")
 
     # Benchmark series
     bench_px = fetch_price_series(benchmark, period=history, interval="1d")
@@ -418,7 +438,8 @@ if run_btn:
     display_idx = [t for t in user_tickers if t in out.index]
     out = out.reindex(display_idx).sort_values("RATING_0_100", ascending=False)
 
-    st.success(f"VIX: {round(vix_level,2) if not np.isnan(vix_level) else 'N/A'} | Benchmark: {benchmark} | Peer set: {universe_mode}")
+    st.success(f"VIX: {round(vix_level,2) if not np.isnan(vix_level) else 'N/A'} | "
+               f"Benchmark: {benchmark} | Peer set: {universe_mode} (loaded {peer_loaded})")
     st.subheader("🏁 Ratings")
     st.dataframe(out.round(4))
 
@@ -433,31 +454,24 @@ if run_btn:
             c4.metric("Macro (VIX)",  f"{out.loc[t,'MACRO_score']:.3f}")
 
             # fundamentals detail
-            if include_fund and t in FUND_score.index:
+            if include_fund and 'fund_scores' in locals() and t in fund_scores.index:
                 st.markdown("**Fundamentals (z-scores)**")
-                fz = {k: v for k, v in fund_scores.loc[t].dropna().to_dict().items() if k.endswith("_z")} if 'fund_scores' in locals() and t in fund_scores.index else {}
-                if fz:
-                    st.table(pd.Series(fz, name=t).round(3))
-                else:
-                    st.caption("No fundamental details available.")
+                fz = {k: v for k, v in fund_scores.loc[t].dropna().to_dict().items() if k.endswith("_z")}
+                st.table(pd.Series(fz, name=t).round(3)) if fz else st.caption("No fundamental details available.")
 
             # technicals detail
             if include_tech and t in tech.index:
                 st.markdown("**Technicals (z-scores)**")
-                tz = {f"{c}_z": tech.loc[t, f"{c}_z"] for c in ["dma_gap","macd_hist","rsi_strength","mom12m"] if f"{c}_z" in tech.columns and pd.notna(tech.loc[t, f"{c}_z"])}
-                if tz:
-                    st.table(pd.Series(tz, name=t).round(3))
-                else:
-                    st.caption("No technical details available.")
+                tz = {f"{c}_z": tech.loc[t, f"{c}_z"] for c in ["dma_gap","macd_hist","rsi_strength","mom12m"]
+                      if f"{c}_z" in tech.columns and pd.notna(tech.loc[t, f"{c}_z"])}
+                st.table(pd.Series(tz, name=t).round(3)) if tz else st.caption("No technical details available.")
 
             # relative detail
             if include_rel and t in rel.index:
                 st.markdown("**Relative to benchmark (z-scores)**")
-                rz = {f"{c}_z": rel.loc[t, f"{c}_z"] for c in ["rel_dma_gap","rel_mom12m","alpha_60d"] if f"{c}_z" in rel.columns and pd.notna(rel.loc[t, f"{c}_z"])}
-                if rz:
-                    st.table(pd.Series(rz, name=t).round(3))
-                else:
-                    st.caption("No relative details available.")
+                rz = {f"{c}_z": rel.loc[t, f"{c}_z"] for c in ["rel_dma_gap","rel_mom12m","alpha_60d"]
+                      if f"{c}_z" in rel.columns and pd.notna(rel.loc[t, f"{c}_z"])}
+                st.table(pd.Series(rz, name=t).round(3)) if rz else st.caption("No relative details available.")
 
     # ---------- Charts ----------
     if display_idx:
@@ -466,6 +480,7 @@ if run_btn:
         if px is not None:
             st.subheader("📊 Price & EMAs")
             st.line_chart(pd.DataFrame({"Price": px, "EMA20": ema(px,20), "EMA100": ema(px,100)}))
+            bench_px = fetch_price_series(benchmark, period=history, interval="1d")
             if include_rel and not bench_px.empty:
                 ratio = (px / bench_px.reindex(px.index)).dropna()
                 st.subheader("📊 Relative (Stock/Benchmark)")
