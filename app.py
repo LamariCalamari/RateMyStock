@@ -1,4 +1,4 @@
-# app.py — ⭐️ Rate My Stock (peer sampling + explainable signals, fixed factors)
+# app.py — ⭐️ Rate My Stock (single-ticker OK; peers auto from index membership)
 
 import io, os, time, datetime
 import numpy as np
@@ -9,7 +9,7 @@ import yfinance as yf
 # ---------------- Page ----------------
 st.set_page_config(page_title="Rate My Stock", layout="wide")
 st.title("⭐️ Rate My Stock")
-st.caption("Pick a stock, pick a squad (peer universe), and get a vibe-checked rating — with friendly explanations for every signal.")
+st.caption("Type a ticker. We’ll grab its peers from the index and rate it with friendly explanations.")
 
 # ------------- Helpers / Math ----------
 def yf_symbol(t: str) -> str:
@@ -83,7 +83,8 @@ def fetch_prices_chunked_with_fallback(tickers, period="1y", interval="1d",
                     s = df["Close"].dropna()
                     if s.size: frames.append(s.rename(t)); ok.append(t)
                     else: fail.append(t)
-                else: fail.append(t)
+                else:
+                    fail.append(t)
         except Exception:
             fail.extend(group)
         time.sleep(sleep_between)
@@ -229,7 +230,7 @@ def technical_scores(price_panel: dict) -> pd.DataFrame:
     rows = []
     for ticker, px in price_panel.items():
         px = px.dropna()
-        if len(px) < 130:  # need EMA100 & MACD stability
+        if len(px) < 130:
             continue
         ema100 = ema(px, 100)
         dma_gap = (px.iloc[-1] - ema100.iloc[-1]) / ema100.iloc[-1]
@@ -285,59 +286,66 @@ def list_dow30():
         return set()
 
 def build_universe(user_tickers, mode, custom_raw="", sample_n=80):
+    """
+    Build the UNIVERSE USED FOR SCORING.
+    If user enters a SINGLE ticker, we STILL build a peer set from the chosen universe,
+    so that single ticker is compared against index peers (not just itself).
+    """
     user = [yf_symbol(t) for t in user_tickers if t]
     if mode == "S&P 500":
         peers_all = list_sp500()
     elif mode == "Dow 30":
         peers_all = list_dow30()
     elif mode == "User list only":
+        # Only user tickers (not recommended; z-scores need peers)
         return user
     elif mode == "Custom (paste list)":
         custom = {yf_symbol(t) for t in custom_raw.split(",") if t.strip()}
         return sorted(set(user) | custom)
-    else:  # Auto by membership (fall back to S&P)
+    else:  # Auto by membership (single ticker friendly)
         sp, dj = list_sp500(), list_dow30()
         auto = set()
-        for t in user:
-            if t in sp: auto |= sp
-            elif t in dj: auto |= dj
+        # If only one ticker, detect its membership and use that index
+        if len(user) == 1:
+            t = user[0]
+            if t in sp: auto = sp
+            elif t in dj: auto = dj
+        else:
+            for t in user:
+                if t in sp: auto |= sp
+                elif t in dj: auto |= dj
         peers_all = auto if auto else (sp or dj)
 
+    # sample (exclude the user's tickers so we truly compare TO peers)
     peers = sorted(peers_all.difference(set(user)))
     if len(peers) > sample_n:
         peers = peers[:sample_n]
+    # universe used for scoring = user + sampled peers
     return sorted(set(user) | set(peers))
 
 # -------------- Sidebar -----------------
 st.sidebar.header("⚙️ Settings")
 
-tickers_input = st.sidebar.text_area("Tickers (comma-separated):", "AAPL, MSFT, NVDA")
+tickers_input = st.sidebar.text_area("Ticker(s) — one is fine:", "AAPL")
 user_tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 
 universe_mode = st.sidebar.selectbox(
-    "Peer universe",
+    "Peer universe (what we compare against)",
     ["Auto by index membership", "S&P 500", "Dow 30", "User list only", "Custom (paste list)"],
     index=0
 )
 peer_sample_n = st.sidebar.slider("Peer sample size (for speed)", 20, 150, 80, 10)
 custom_universe_raw = ""
 if universe_mode == "Custom (paste list)":
-    custom_universe_raw = st.sidebar.text_area("Paste custom peers (comma-separated):", "AMD, AVGO, CRM, COST, NFLX")
+    custom_universe_raw = st.sidebar.text_area("Custom peers (comma-separated):", "AMD, AVGO, CRM, COST, NFLX")
 
 benchmark = st.sidebar.selectbox(
-    "Benchmark (for relative comparison):",
+    "Benchmark (for relative features)",
     ["SPY (S&P 500 ETF)", "^GSPC (S&P 500 Index)", "QQQ (Nasdaq ETF)", "^IXIC (Nasdaq Index)", "^DJI (Dow Jones)"],
     index=0
 ).split()[0]
 
 history = st.sidebar.selectbox("History window", ["1y", "2y", "5y"], index=0)
-
-with st.expander("ℹ️ Peer universe vs Benchmark"):
-    st.markdown(
-        "- **Peer universe**: group we compare against to compute cross-sectional z-scores for **Fundamentals/Technicals/Relative**.\n"
-        "- **Benchmark**: single index/ETF used for **relative features** (price vs benchmark, 12-month relative momentum, 60-day alpha).\n"
-        "You can set both to S&P — they do different jobs."
-    )
 
 st.sidebar.markdown("### Component Weights")
 w_fund = st.sidebar.slider("Fundamentals", 0.0, 1.0, 0.5, 0.05)
@@ -350,7 +358,7 @@ FUND_HIGHER_BETTER = ["rev_growth", "eps_growth", "roe", "net_margin", "gross_ma
 FUND_LOWER_BETTER  = ["pe", "ev_ebitda", "de_ratio"]
 TECH_PARTS = ["dma_gap", "macd_hist", "rsi_strength", "mom12m"]
 
-# Component toggles (keep these to let users weight/omit whole blocks)
+# Block toggles
 include_fund = st.sidebar.checkbox("Include Fundamentals", True)
 include_tech = st.sidebar.checkbox("Include Technicals", True)
 include_macro = st.sidebar.checkbox("Include Macro Overlay (VIX)", True)
@@ -360,17 +368,14 @@ run_btn = st.sidebar.button("🚀 Rate it!")
 
 # ---------------- Interpretation helpers ----------------
 def label_badge(value, pos_thresh=None, neg_thresh=None, higher_is_better=True, units=""):
-    """Return emoji label for a scalar signal."""
     v = value
-    if pd.isna(v):
-        return "⚪ Neutral"
+    if pd.isna(v): return "⚪ Neutral"
     if higher_is_better:
         if pos_thresh is None: pos_thresh = 0
         if v > pos_thresh: return f"🟢 Bullish ({v:.3f}{units})"
         if neg_thresh is not None and v < neg_thresh: return f"🔴 Bearish ({v:.3f}{units})"
         return f"⚪ Neutral ({v:.3f}{units})"
     else:
-        # lower-is-better case (rare here)
         if neg_thresh is None: neg_thresh = 0
         if v < neg_thresh: return f"🟢 Bullish ({v:.3f}{units})"
         if pos_thresh is not None and v > pos_thresh: return f"🔴 Bearish ({v:.3f}{units})"
@@ -378,59 +383,47 @@ def label_badge(value, pos_thresh=None, neg_thresh=None, higher_is_better=True, 
 
 def explain_technicals_row(row):
     notes = []
-    # dma_gap: price vs EMA100
-    notes.append(f"• **Price vs EMA(100)**: {label_badge(row.get('dma_gap'), pos_thresh=0, units='')}. "
-                 "Above EMA can mean up-trend; below can mean weakness or value entry depending on context.")
-    # macd_hist
-    notes.append(f"• **MACD histogram**: {label_badge(row.get('macd_hist'), pos_thresh=0)}. "
-                 "Positive implies bullish momentum building; negative implies momentum fading.")
-    # RSI
-    rsi_strength = row.get("rsi_strength")
-    rsi_val = None
-    if pd.notna(rsi_strength):
-        rsi_val = 50 + 50*rsi_strength
+    notes.append(f"• **Price vs EMA(100)**: {label_badge(row.get('dma_gap'), pos_thresh=0)}. Above EMA can mean up-trend; below can mean weakness or a value entry (context matters).")
+    notes.append(f"• **MACD histogram**: {label_badge(row.get('macd_hist'), pos_thresh=0)}. Positive = bullish momentum building; negative = momentum fading.")
+    rsi_strength = row.get("rsi_strength"); rsi_val = 50 + 50*rsi_strength if pd.notna(rsi_strength) else None
     if rsi_val is not None:
-        if rsi_val >= 60: rsi_note = "🟢 Bullish (RSI≈{:.0f})".format(rsi_val)
-        elif rsi_val <= 40: rsi_note = "🔴 Bearish (RSI≈{:.0f})".format(rsi_val)
-        else: rsi_note = "⚪ Neutral (RSI≈{:.0f})".format(rsi_val)
+        if rsi_val >= 60: rsi_note = f"🟢 Bullish (RSI≈{rsi_val:.0f})"
+        elif rsi_val <= 40: rsi_note = f"🔴 Bearish (RSI≈{rsi_val:.0f})"
+        else: rsi_note = f"⚪ Neutral (RSI≈{rsi_val:.0f})"
     else:
         rsi_note = "⚪ Neutral"
     notes.append(f"• **RSI**: {rsi_note}. 70+ can be overbought; 30− can be oversold.")
-    # 12-month momentum
-    notes.append(f"• **12-month momentum**: {label_badge(row.get('mom12m'), pos_thresh=0)}. "
-                 "Positive = outperformed own past year.")
+    notes.append(f"• **12-month momentum**: {label_badge(row.get('mom12m'), pos_thresh=0)}. Positive = outperformed its own past year.")
     return "\n".join(notes)
 
 def explain_relative_row(row):
     notes = []
     notes.append(f"• **Ratio EMA gap (stock/benchmark)**: {label_badge(row.get('rel_dma_gap'), pos_thresh=0)}.")
     notes.append(f"• **12-month relative momentum**: {label_badge(row.get('rel_mom12m'), pos_thresh=0)}.")
-    notes.append(f"• **Rolling alpha (60d)**: {label_badge(row.get('alpha_60d'), pos_thresh=0)}. "
-                 "Positive alpha = beating benchmark on a risk-adjusted basis recently.")
+    notes.append(f"• **Rolling alpha (60d)**: {label_badge(row.get('alpha_60d'), pos_thresh=0)}. Positive = beating benchmark on a risk-adjusted basis recently.")
     return "\n".join(notes)
 
 # -------------- Main flow ---------------
 if run_btn:
-    # Universe (user + sampled peers)
+    # Universe (user + sampled peers from chosen index)
     universe_tickers = build_universe(user_tickers, universe_mode, custom_universe_raw, peer_sample_n)
     if not universe_tickers:
-        st.error("Please enter at least one ticker.")
+        st.error("Please enter a valid ticker.")
         st.stop()
 
     # Prices (chunked + fallback)
-    with st.spinner("Downloading prices for peer universe..."):
+    with st.spinner("Downloading prices for peers..."):
         prices, ok, fail = fetch_prices_chunked_with_fallback(
             universe_tickers, period=history, interval="1d",
-            chunk=50, min_ok=min(30, peer_sample_n)
+            chunk=50, min_ok=min(30, max(peer_sample_n, 30))
         )
     price_panel = {t: prices[t].dropna() for t in ok if t in prices.columns and prices[t].dropna().size > 0}
     peer_loaded = len(price_panel)
     if peer_loaded < 5:
-        st.warning(f"Only {peer_loaded} tickers loaded (rate limits or long history). "
-                   f"Try a larger sample size or shorter history (1y).")
-    skipped_user = [yf_symbol(t) for t in user_tickers if yf_symbol(t) not in price_panel]
-    if skipped_user:
-        st.info(f"Skipped (no price data): {', '.join(skipped_user)}")
+        st.warning(f"Only {peer_loaded} tickers loaded (rate limits or long history). Try a larger peer sample or 1y history.")
+    missed = [yf_symbol(t) for t in user_tickers if yf_symbol(t) not in price_panel]
+    if missed:
+        st.info(f"Your input with no price data: {', '.join(missed)}")
 
     if not price_panel:
         st.error("No valid price data downloaded.")
@@ -442,34 +435,26 @@ if run_btn:
         st.warning(f"Benchmark {benchmark} not available; relative signals disabled.")
         include_rel = False
 
-    # Technicals (universe z-scores)
+    # Technicals
     tech = technical_scores(price_panel)
     for col in TECH_PARTS:
-        if col in tech.columns and include_tech:
-            tech[f"{col}_z"] = zscore_series(tech[col])
-        else:
-            tech[f"{col}_z"] = np.nan
-    TECH_score = (
-        tech[[f"{c}_z" for c in TECH_PARTS if f"{c}_z" in tech.columns]].mean(axis=1)
-        if include_tech else pd.Series(0.0, index=list(price_panel.keys()))
-    )
+        tech[f"{col}_z"] = zscore_series(tech[col]) if include_tech and col in tech.columns else np.nan
+    TECH_score = tech[[f"{c}_z" for c in TECH_PARTS if f"{c}_z" in tech.columns]].mean(axis=1) if include_tech else pd.Series(0.0, index=list(price_panel.keys()))
 
-    # Fundamentals (universe z-scores)
-    with st.spinner("Fetching fundamentals for peer universe..."):
+    # Fundamentals
+    with st.spinner("Fetching fundamentals for peers..."):
         fundamentals = fetch_fundamentals(list(price_panel.keys()))
     fund_scores = pd.DataFrame(index=fundamentals.index)
     if include_fund and not fundamentals.empty:
         for col in FUND_HIGHER_BETTER:
-            if col in fundamentals.columns:
-                fund_scores[f"{col}_z"] = zscore_series(fundamentals[col])
+            if col in fundamentals.columns: fund_scores[f"{col}_z"] = zscore_series(fundamentals[col])
         for col in FUND_LOWER_BETTER:
-            if col in fundamentals.columns:
-                fund_scores[f"{col}_z"] = zscore_series(-fundamentals[col])
+            if col in fundamentals.columns: fund_scores[f"{col}_z"] = zscore_series(-fundamentals[col])
         FUND_score = fund_scores.mean(axis=1) if len(fund_scores.columns) else pd.Series(0.0, index=fundamentals.index)
     else:
         FUND_score = pd.Series(0.0, index=list(price_panel.keys()))
 
-    # Relative-to-benchmark (universe z-scores)
+    # Relative-to-benchmark
     rel_rows = []
     if include_rel and not bench_px.empty:
         for t, px in price_panel.items():
@@ -483,10 +468,7 @@ if run_btn:
     rel = pd.DataFrame(rel_rows).set_index("ticker") if rel_rows else pd.DataFrame(index=list(price_panel.keys()))
     for col in ["rel_dma_gap","rel_mom12m","alpha_60d"]:
         rel[f"{col}_z"] = zscore_series(rel[col]) if include_rel and col in rel.columns else np.nan
-    REL_score = (
-        rel[[c for c in ["rel_dma_gap_z","rel_mom12m_z","alpha_60d_z"] if c in rel.columns]].mean(axis=1)
-        if include_rel else pd.Series(0.0, index=list(price_panel.keys()))
-    )
+    REL_score = rel[[c for c in ["rel_dma_gap_z","rel_mom12m_z","alpha_60d_z"] if c in rel.columns]].mean(axis=1) if include_rel else pd.Series(0.0, index=list(price_panel.keys()))
 
     # Macro
     vix_level = fetch_vix_level() if include_macro else np.nan
@@ -520,7 +502,7 @@ if run_btn:
         return "Strong Sell"
     out["RECO"] = out["RATING_0_100"].apply(bucket)
 
-    # Show only user inputs (scores computed vs peers)
+    # Only show the tickers the user entered (even though we loaded peers)
     display_idx = [yf_symbol(t) for t in user_tickers if yf_symbol(t) in out.index]
     out = out.reindex(display_idx).sort_values("RATING_0_100", ascending=False)
 
@@ -539,7 +521,6 @@ if run_btn:
             c3.metric("Relative",     f"{out.loc[t,'REL_score']:.3f}")
             c4.metric("Macro (VIX)",  f"{out.loc[t,'MACRO_score']:.3f}")
 
-            # Fundamentals detail
             if include_fund and 'fund_scores' in locals() and t in fund_scores.index:
                 st.markdown("**Fundamentals (z-scores vs peers)**")
                 fz = {k: v for k, v in fund_scores.loc[t].dropna().to_dict().items() if k.endswith("_z")}
@@ -550,7 +531,6 @@ if run_btn:
                 else:
                     st.caption("No fundamental details available.")
 
-            # Technicals detail + plain-English interpretation
             if include_tech and t in tech.index:
                 st.markdown("**Technicals (z-scores vs peers)**")
                 tz = {f"{c}_z": tech.loc[t, f"{c}_z"] for c in TECH_PARTS
@@ -560,7 +540,6 @@ if run_btn:
                 st.markdown("**Interpretation**")
                 st.markdown(explain_technicals_row(row))
 
-            # Relative detail + interpretation
             if include_rel and t in rel.index:
                 st.markdown("**Relative to benchmark (z-scores vs peers)**")
                 rz = {f"{c}_z": rel.loc[t, f"{c}_z"] for c in ["rel_dma_gap","rel_mom12m","alpha_60d"]
@@ -569,7 +548,7 @@ if run_btn:
                 st.markdown("**Interpretation**")
                 st.markdown(explain_relative_row(rel.loc[t].to_dict()))
 
-    # ---------- Charts + live EMA callout ----------
+    # ---------- Charts + EMA callouts ----------
     if display_idx:
         sel = st.selectbox("Choose ticker for charts", display_idx)
         px = price_panel.get(sel)
@@ -578,13 +557,10 @@ if run_btn:
             last = px.iloc[-1]; e20 = ema20.iloc[-1]; e100 = ema100.iloc[-1]
             gap20 = (last - e20) / e20 if e20 else np.nan
             gap100 = (last - e100) / e100 if e100 else np.nan
-            # Friendly guidance
             msg = []
-            if pd.notna(gap20):
-                msg.append(f"Price vs **EMA20**: {label_badge(gap20, pos_thresh=0)}")
-            if pd.notna(gap100):
-                msg.append(f"Price vs **EMA100**: {label_badge(gap100, pos_thresh=0)}")
-            st.info(" | ".join(msg) + " — Above EMA suggests an up-trend; below EMA can be a sign of weakness or potential value entry (context matters).")
+            if pd.notna(gap20):  msg.append(f"Price vs **EMA20**: {label_badge(gap20, pos_thresh=0)}")
+            if pd.notna(gap100): msg.append(f"Price vs **EMA100**: {label_badge(gap100, pos_thresh=0)}")
+            st.info(" | ".join(msg) + " — Above EMA suggests an up-trend; below EMA can signal weakness or potential value entry (context matters).")
 
             st.subheader("📊 Price & EMAs")
             st.line_chart(pd.DataFrame({"Price": px, "EMA20": ema20, "EMA100": ema100}))
