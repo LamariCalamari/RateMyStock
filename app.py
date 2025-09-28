@@ -1,4 +1,5 @@
-# app.py — ⭐ Rate My (Stock + Portfolio) — full build with charts, macro explanations, exports, and bug-fixed editor
+# app.py — ⭐ Rate My (Stock + Portfolio)
+# Restores all charts & explanations, fixes portfolio editor, boosts peer loading via 2-pass fetch.
 
 import io
 import time
@@ -7,7 +8,7 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-# --------------------- Page & Styles ---------------------
+# --------------------- Page & CSS ---------------------
 st.set_page_config(page_title="Rate My", layout="wide")
 st.markdown("""
 <style>
@@ -23,6 +24,7 @@ st.markdown("""
 .topbar {display:flex; justify-content:flex-end; margin:.25rem 0 .5rem;}
 .kpi-num {font-size:2.2rem; font-weight:700; margin-top:.25rem;}
 .kpi-card {padding:.9rem 1rem; border-radius:12px; background:#111418; border:1px solid #222;}
+.chart-caption {color:#9aa0a6; margin:-.5rem 0 1rem;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -70,13 +72,24 @@ def zscore_series(s: pd.Series) -> pd.Series:
 def percentile_rank(s: pd.Series) -> pd.Series:
     return s.rank(pct=True) * 100.0
 
-# -------------- Cached fetchers --------------
+# -------------- Robust 2-pass fetcher --------------
 @st.cache_data(show_spinner=False)
 def fetch_prices_chunked_with_fallback(tickers, period="1y", interval="1d",
-                                       chunk=50, min_ok=50, sleep_between=0.2):
+                                       chunk=40, min_ok=80, sleep_between=0.25,
+                                       retry_singles=True, singles_pause=0.15, hard_limit=250):
     tickers = [yf_symbol(t) for t in tickers if t]
-    tickers = list(dict.fromkeys(tickers))
+    # limit to hard_limit to keep app responsive
+    tickers = list(dict.fromkeys(tickers))[:hard_limit]
     frames, ok = [], []
+
+    def _append_from_multi(df, names):
+        got = set(df.columns.get_level_values(0))
+        for t in names:
+            if t in got:
+                s = df[t]["Close"].dropna()
+                if s.size: frames.append(s.rename(t)); ok.append(t)
+
+    # Pass 1: chunked
     for i in range(0, len(tickers), chunk):
         group = tickers[i:i+chunk]
         try:
@@ -84,12 +97,9 @@ def fetch_prices_chunked_with_fallback(tickers, period="1y", interval="1d",
                              auto_adjust=True, group_by="ticker",
                              threads=True, progress=False)
             if isinstance(df.columns, pd.MultiIndex):
-                got = set(df.columns.get_level_values(0))
-                for t in group:
-                    if t in got:
-                        s = df[t]["Close"].dropna()
-                        if s.size: frames.append(s.rename(t)); ok.append(t)
+                _append_from_multi(df, group)
             else:
+                # single return path
                 t = group[0]
                 if "Close" in df:
                     s = df["Close"].dropna()
@@ -97,6 +107,24 @@ def fetch_prices_chunked_with_fallback(tickers, period="1y", interval="1d",
         except Exception:
             pass
         time.sleep(sleep_between)
+
+    ok_set = set(ok)
+    missing = [t for t in tickers if t not in ok_set]
+
+    # Pass 2: singles retry (helps when Yahoo rate-limits multi)
+    if retry_singles and missing:
+        for t in missing:
+            try:
+                df = yf.download(t, period=period, interval=interval,
+                                 auto_adjust=True, group_by="ticker",
+                                 threads=False, progress=False)
+                if "Close" in df:
+                    s = df["Close"].dropna()
+                    if s.size: frames.append(s.rename(t)); ok.append(t)
+            except Exception:
+                pass
+            time.sleep(singles_pause)
+
     prices = pd.concat(frames, axis=1).sort_index() if frames else pd.DataFrame()
     if not prices.empty:
         prices = prices.loc[:, ~prices.columns.duplicated()].sort_index()
@@ -159,7 +187,7 @@ def list_nasdaq100():
         pass
     return set(NASDAQ100_FALLBACK)
 
-def build_universe(user_tickers, mode, sample_n=120, custom_raw=""):
+def build_universe(user_tickers, mode, sample_n=150, custom_raw=""):
     user = [yf_symbol(t) for t in user_tickers]
     if mode == "S&P 500":
         peers_all = list_sp500(); bench="SPY"; label="S&P 500"
@@ -169,7 +197,7 @@ def build_universe(user_tickers, mode, sample_n=120, custom_raw=""):
         peers_all = list_nasdaq100(); bench="QQQ"; label="NASDAQ 100"
     elif mode == "Custom (paste list)":
         custom = {yf_symbol(t) for t in custom_raw.split(",") if t.strip()}
-        return sorted(set(user)|custom), "Custom", "Custom"
+        return sorted(set(user)|custom)[:250], "Custom", "Custom"
     else:
         sp,dj,nd = list_sp500(), list_dow30(), list_nasdaq100()
         auto=set(); bench,label="SPY","S&P 500"
@@ -179,20 +207,22 @@ def build_universe(user_tickers, mode, sample_n=120, custom_raw=""):
             elif t in dj: auto=dj; bench,label="DIA","Dow 30"
             elif t in nd: auto=nd; bench,label="QQQ","NASDAQ 100"
         else:
+            # union of memberships
             for t in user:
                 if t in sp: auto|=sp; bench,label="SPY","S&P 500"
                 elif t in dj: auto|=dj; bench,label="DIA","Dow 30"
                 elif t in nd: auto|=nd; bench,label="QQQ","NASDAQ 100"
         peers_all = auto if auto else sp
-    peers = sorted(peers_all.difference(set(user)))[:sample_n]
-    return sorted(set(user)|set(peers)), bench, label
+    peers = sorted(peers_all.difference(set(user)))[:max(1, sample_n)]
+    return sorted(set(user)|set(peers))[:250], bench, label
 
 # -------------- Feature builders --------------
 def technical_scores(price_panel: dict) -> pd.DataFrame:
     rows=[]
     for ticker, px in price_panel.items():
         px=px.dropna()
-        if len(px)<130: continue
+        if len(px)<100:  # need some history for EMA100/MACD
+            continue
         ema100=ema(px,100)
         base=ema100.iloc[-1] if pd.notna(ema100.iloc[-1]) and ema100.iloc[-1]!=0 else np.nan
         dma_gap=(px.iloc[-1]-ema100.iloc[-1])/base if pd.notna(base) else np.nan
@@ -200,9 +230,11 @@ def technical_scores(price_panel: dict) -> pd.DataFrame:
         macd_hist = hist.iloc[-1]
         r = rsi(px).iloc[-1]
         rsi_strength = (r-50.0)/50.0
-        mom12m = px.iloc[-1]/px.iloc[-253]-1.0 if len(px)>252 else np.nan
+        mom = np.nan
+        if len(px) > 252:
+            mom = px.iloc[-1]/px.iloc[-253]-1.0
         rows.append({"ticker":ticker,"dma_gap":dma_gap,"macd_hist":macd_hist,
-                     "rsi_strength":rsi_strength,"mom12m":mom12m})
+                     "rsi_strength":rsi_strength,"mom12m":mom})
     return pd.DataFrame(rows).set_index("ticker") if rows else pd.DataFrame()
 
 def macro_from_vix(vix_series: pd.Series):
@@ -211,11 +243,9 @@ def macro_from_vix(vix_series: pd.Series):
     vix_last = float(vix_series.iloc[-1])
     ema20    = float(ema(vix_series,20).iloc[-1]) if len(vix_series)>=20 else vix_last
     rel_gap  = (vix_last-ema20)/max(ema20,1e-9)
-    # Map level 12→1.0, 28→0.0 (clip)
     if   vix_last<=12: level=1.0
     elif vix_last>=28: level=0.0
     else: level = 1.0-(vix_last-12)/16.0
-    # Map trend: above EMA hurts, below helps
     if   rel_gap>=0.30: trend=0.0
     elif rel_gap<=-0.10: trend=1.0
     else:
@@ -242,27 +272,33 @@ def topbar_back(key):
 
 # ======== STOCK CHARTS ========
 def draw_stock_charts(t: str, series: pd.Series):
-    st.markdown("### 📈 Charts")
     if series is None or series.empty:
         st.info("Not enough history to show charts.")
         return
 
-    # Price + EMAs
+    st.subheader("📈 Price & EMAs")
     e20, e50, e100 = ema(series,20), ema(series,50), ema(series,100)
     price_df = pd.DataFrame({"Close": series, "EMA20": e20, "EMA50": e50, "EMA100": e100})
-    st.line_chart(price_df)
+    st.line_chart(price_df, use_container_width=True)
+    st.caption("If price is **above** EMAs (esp. EMA100), that supports strength; **below** suggests weakness.")
 
-    # MACD
+    st.subheader("📉 MACD")
     line, sig, hist = macd(series)
-    st.line_chart(pd.DataFrame({"MACD line": line, "Signal": sig}))
-    st.bar_chart(pd.DataFrame({"Histogram": hist}))
+    st.line_chart(pd.DataFrame({"MACD line": line, "Signal": sig}), use_container_width=True)
+    st.bar_chart(pd.DataFrame({"Histogram": hist}), use_container_width=True)
+    st.caption("Positive/expanding histogram supports momentum; negative/contracting shows fading momentum.")
 
-    # RSI
-    st.line_chart(pd.DataFrame({"RSI(14)": rsi(series)}))
+    st.subheader("🔁 RSI (14)")
+    st.line_chart(pd.DataFrame({"RSI(14)": rsi(series)}), use_container_width=True)
+    st.caption("RSI near **70** = overbought; near **30** = oversold; around **50** = neutral trend strength.")
 
-    # 12m momentum
-    mom12 = series/series.shift(253)-1.0
-    st.line_chart(pd.DataFrame({"12m momentum": mom12}))
+    st.subheader("🚀 12-month momentum")
+    if len(series) > 252:
+        mom12 = series/series.shift(253)-1.0
+        st.line_chart(pd.DataFrame({"12m momentum": mom12}), use_container_width=True)
+        st.caption("Positive vs one year ago indicates longer-term outperformance.")
+    else:
+        st.info("Not enough data to compute 12-month momentum (need > 1 year).")
 
 # =============== STOCK APP ===============
 def app_stock():
@@ -280,7 +316,7 @@ def app_stock():
                 ["Auto by index membership","S&P 500","Dow 30","NASDAQ 100","Custom (paste list)"], index=0
             )
         with c2:
-            peer_n = st.slider("Peer sample size", 30, 220, 120, 10)
+            peer_n = st.slider("Peer sample size", 30, 250, 150, 10)
         with c3:
             history = st.selectbox("History", ["1y","2y","5y"], index=0)
         c4,c5,c6 = st.columns(3)
@@ -302,14 +338,17 @@ def app_stock():
         universe, bench, label = build_universe(user_tickers, universe_mode, peer_n, custom_raw)
         prog.progress(10)
 
-        status.update(label="Downloading prices…")
-        prices, ok = fetch_prices_chunked_with_fallback(universe, period=history, interval="1d",
-                                                        chunk=50, min_ok=min(60, max(40, int(peer_n*0.6))))
+        status.update(label="Downloading prices (2-pass)…")
+        prices, ok = fetch_prices_chunked_with_fallback(
+            universe, period=history, interval="1d",
+            chunk=40, min_ok=min(100, max(60, int(peer_n*0.6))),
+            retry_singles=True
+        )
         if not ok:
             st.error("No peer prices loaded.")
             return
         panel = {t: prices[t].dropna() for t in ok if t in prices.columns and prices[t].dropna().size>0}
-        prog.progress(40)
+        prog.progress(45)
 
         status.update(label="Computing technicals…")
         tech = technical_scores(panel)
@@ -328,7 +367,7 @@ def app_stock():
         for col in ["trailingPE","forwardPE","debtToEquity"]:
             if col in fund_raw.columns: fdf[f"{col}_z"] = zscore_series(-fund_raw[col])
         FUND_score = fdf.mean(axis=1) if len(fdf.columns) else pd.Series(0.0, index=fund_raw.index)
-        prog.progress(86)
+        prog.progress(88)
 
         status.update(label="Assessing macro regime…")
         vix_series = fetch_vix_series(period="6mo", interval="1d")
@@ -367,11 +406,10 @@ def app_stock():
     st.dataframe(pretty.round(4), use_container_width=True)
 
     st.markdown("## 🔎 Why this rating?")
-    all_rows = []  # for "download all"
+    all_rows = []
     for t in show_idx:
         reco = table.loc[t,"RECO"]; sc = table.loc[t,"RATING_0_100"]
         with st.expander(f"{t} — {reco} (Score: {sc:.1f})", expanded=True):
-            # KPI row
             k1,k2,k3 = st.columns(3)
             k1.markdown('<div class="kpi-card"><div>Fundamentals</div>'
                         f'<div class="kpi-num">{table.loc[t,"FUND_score"]:.3f}</div></div>', unsafe_allow_html=True)
@@ -380,8 +418,7 @@ def app_stock():
             k3.markdown('<div class="kpi-card"><div>Macro (VIX)</div>'
                         f'<div class="kpi-num">{table.loc[t,"MACRO_score"]:.3f}</div></div>', unsafe_allow_html=True)
 
-            # Fundamentals detail
-            st.markdown("#### Fundamentals (z-scores vs peers)")
+            st.markdown("#### Fundamentals — peer-relative z-scores")
             fshow = pd.DataFrame({
                 "Revenue growth (z)": fdf.loc[t, "revenueGrowth_z"] if "revenueGrowth_z" in fdf.columns else np.nan,
                 "Earnings growth (z)": fdf.loc[t, "earningsGrowth_z"] if "earningsGrowth_z" in fdf.columns else np.nan,
@@ -395,9 +432,8 @@ def app_stock():
                 "Debt/Equity (z, lower better)": fdf.loc[t, "debtToEquity_z"] if "debtToEquity_z" in fdf.columns else np.nan,
             }, index=[t]).T.rename(columns={t:"z-score"})
             st.dataframe(fshow.round(3), use_container_width=True)
-            st.caption("Positive z-scores: above-peer values. For valuation/leverage rows, negative values are better (cheaper / less debt).")
+            st.caption("Positive z-scores: above peers. For valuation/leverage rows, **negative** is better (cheaper / less debt).")
 
-            # Technicals detail
             st.markdown("#### Technicals")
             if t in tech.index:
                 rsi_val = 50 + 50*tech.loc[t,"rsi_strength"] if "rsi_strength" in tech.columns and pd.notna(tech.loc[t,"rsi_strength"]) else np.nan
@@ -408,41 +444,29 @@ def app_stock():
                     "12-mo momentum": tech.loc[t,"mom12m"] if "mom12m" in tech.columns else np.nan,
                 }, index=[t]).T.rename(columns={t:"value"})
                 st.dataframe(tshow.round(3), use_container_width=True)
-                st.caption("Above EMA100 + positive MACD = strength. RSI ~70 overbought / ~30 oversold. 12-mo momentum compares to 1 year ago.")
+                st.caption("Above EMA100 + positive MACD = strength. RSI ~70 overbought / ~30 oversold. Momentum compares to 1 year ago.")
             else:
                 st.info("Not enough price history for technicals.")
 
-            # Macro detail (with interpretation)
             st.markdown("#### Macro (VIX) — level & trend")
             if not np.isnan(vix_last):
                 m1,m2,m3 = st.columns(3)
                 m1.metric("VIX (last)", f"{vix_last:.2f}")
                 m2.metric("VIX EMA20", f"{vix_ema20:.2f}")
                 m3.metric("Gap vs EMA20", f"{(vix_gap*100):.1f}%")
-                # Interpretation
-                if vix_last <= 13:
-                    level_txt = "very calm"
-                elif vix_last <= 18:
-                    level_txt = "calm"
-                elif vix_last <= 24:
-                    level_txt = "elevated"
-                else:
-                    level_txt = "stressed"
-
-                if vix_gap > 0.03:
-                    trend_txt = "rising above trend (risk building)"
-                elif vix_gap < -0.03:
-                    trend_txt = "falling below trend (risk easing)"
-                else:
-                    trend_txt = "near trend"
-
-                st.markdown(f"- **Level** suggests **{level_txt}** conditions. "
-                            f"**Trend** is **{trend_txt}**. "
-                            "A higher Macro score reflects calmer levels and/or easing trend.")
+                if vix_last <= 13: level_txt = "very calm"
+                elif vix_last <= 18: level_txt = "calm"
+                elif vix_last <= 24: level_txt = "elevated"
+                else: level_txt = "stressed"
+                if vix_gap > 0.03: trend_txt = "rising above trend (risk building)"
+                elif vix_gap < -0.03: trend_txt = "falling below trend (risk easing)"
+                else: trend_txt = "near trend"
+                st.markdown(f"- **Level** is **{level_txt}**. **Trend** is **{trend_txt}**. "
+                            "Higher Macro is friendlier to risk.")
             else:
-                st.info("VIX unavailable — Macro defaults to a neutral value.")
+                st.info("VIX unavailable — Macro defaults to neutral.")
 
-            # ---------- Export: this ticker ----------
+            # Exports (per-ticker)
             row = {
                 "ticker": t,
                 "fundamentals_score": float(table.loc[t, "FUND_score"]),
@@ -451,9 +475,6 @@ def app_stock():
                 "composite":          float(table.loc[t, "COMPOSITE"]),
                 "score_0_100":        float(table.loc[t, "RATING_0_100"]),
                 "recommendation":     str(table.loc[t, "RECO"]),
-                "vix_last": float(vix_last) if not np.isnan(vix_last) else np.nan,
-                "vix_ema20": float(vix_ema20) if not np.isnan(vix_ema20) else np.nan,
-                "vix_gap_vs_ema": float(vix_gap) if not np.isnan(vix_gap) else np.nan,
             }
             for col in [
                 "revenueGrowth_z","earningsGrowth_z","returnOnEquity_z",
@@ -467,10 +488,9 @@ def app_stock():
                 row[zc] = float(tech.loc[t, zc]) if (t in tech.index and zc in tech.columns and pd.notna(tech.loc[t, zc])) else np.nan
 
             export_df = pd.DataFrame([row])
-            csv_bytes = export_df.to_csv(index=False).encode()
             st.download_button(
                 "⬇️ Download this breakdown (CSV)",
-                data=csv_bytes,
+                data=export_df.to_csv(index=False).encode(),
                 file_name=f"{t}_breakdown.csv",
                 mime="text/csv",
                 use_container_width=True,
@@ -486,13 +506,12 @@ def app_stock():
                 use_container_width=True,
             )
 
-            # Stock charts (price+EMAs, MACD, RSI, momentum)
+            # Stock charts with titles & descriptions
             if t in panel:
                 draw_stock_charts(t, panel[t])
 
             all_rows.append(row)
 
-    # ---------- Export: all shown tickers ----------
     if all_rows:
         df_all = pd.DataFrame(all_rows)
         st.markdown("### Export all shown tickers")
@@ -516,16 +535,10 @@ def app_stock():
 
 # =============== PORTFOLIO APP ===============
 CURRENCY_MAP = {"$":"USD","€":"EUR","£":"GBP","CHF":"CHF","C$":"CAD","A$":"AUD","¥":"JPY"}
-
 def _safe_num(x): return pd.to_numeric(x, errors="coerce")
 
-# >>> FIXED: robust change detection (no Series truth-value errors)
+# FIX: robust change detection
 def detect_change_side(prev_df: pd.DataFrame, curr_df: pd.DataFrame) -> str:
-    """
-    Decide which side changed more between prev and curr:
-    returns "amount", "percent" or "none".
-    Robust to missing columns and different lengths.
-    """
     def col(df, name):
         if df is None or not isinstance(df, pd.DataFrame) or name not in df.columns:
             return pd.Series(dtype=float)
@@ -538,11 +551,8 @@ def detect_change_side(prev_df: pd.DataFrame, curr_df: pd.DataFrame) -> str:
 
     n = max(len(a_prev), len(a_curr), len(p_prev), len(p_curr), 1)
     idx = pd.RangeIndex(n)
-
-    a_prev = a_prev.reindex(idx).fillna(0.0)
-    a_curr = a_curr.reindex(idx).fillna(0.0)
-    p_prev = p_prev.reindex(idx).fillna(0.0)
-    p_curr = p_curr.reindex(idx).fillna(0.0)
+    a_prev = a_prev.reindex(idx).fillna(0.0); a_curr = a_curr.reindex(idx).fillna(0.0)
+    p_prev = p_prev.reindex(idx).fillna(0.0); p_curr = p_curr.reindex(idx).fillna(0.0)
 
     d_amt = (a_curr - a_prev).abs().sum()
     d_pct = (p_curr - p_prev).abs().sum()
@@ -550,6 +560,12 @@ def detect_change_side(prev_df: pd.DataFrame, curr_df: pd.DataFrame) -> str:
     if d_amt > d_pct and d_amt > 0: return "amount"
     if d_pct > d_amt and d_pct > 0: return "percent"
     return "none"
+
+def normalize_percents_to_100(p: pd.Series) -> pd.Series:
+    p = p.fillna(0.0)
+    s = p.sum()
+    if s <= 0: return p
+    return (p / s) * 100.0
 
 def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFrame:
     df=df.copy()
@@ -564,10 +580,8 @@ def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFra
     drive=mode
     if mode=="auto":
         prev=st.session_state.get("prev_grid_df")
-        try:
-            side=detect_change_side(prev, df)
-        except Exception:
-            side="none"
+        try: side=detect_change_side(prev, df)
+        except Exception: side="none"
         if side=="none":
             if has_total and df["Amount"].fillna(0).sum()>0: drive="amount"
             elif df["Percent (%)"].fillna(0).sum()>0: drive="percent"
@@ -577,23 +591,32 @@ def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFra
 
     if has_total:
         if drive=="percent":
-            if df["Percent (%)"].fillna(0).sum()==0: df["Percent (%)"]=100.0/n
+            if df["Percent (%)"].fillna(0).sum()==0:
+                df["Percent (%)"]=100.0/n
+            # normalize to 100%
+            df["Percent (%)"] = normalize_percents_to_100(df["Percent (%)"]).round(2)
             df["Amount"]=(df["Percent (%)"].fillna(0)/100.0*total).round(2)
         else:
             s=df["Amount"].fillna(0).sum()
             if s>0:
-                df["Percent (%)"]=(df["Amount"].fillna(0)/s*100.0).round(2)
+                # normalize by total
+                df["Percent (%)"]= (df["Amount"].fillna(0)/total*100.0).round(2)
+                df["Percent (%)"]= normalize_percents_to_100(df["Percent (%)"]).round(2)
+                df["Amount"]= (df["Percent (%)"]/100.0*total).round(2)
             else:
                 df["Percent (%)"]=100.0/n
+                df["Amount"]= (df["Percent (%)"]/100.0*total).round(2)
     else:
-        if drive=="percent" and df["Percent (%)"].fillna(0).sum()==0:
-            df["Percent (%)"]=100.0/n
+        if drive=="percent":
+            if df["Percent (%)"].fillna(0).sum()==0:
+                df["Percent (%)"]=100.0/n
+            df["Percent (%)"]= normalize_percents_to_100(df["Percent (%)"]).round(2)
 
+    # Weights
     if has_total and df["Amount"].fillna(0).sum()>0:
         w=df["Amount"].fillna(0)/df["Amount"].fillna(0).sum()
     elif df["Percent (%)"].fillna(0).sum()>0:
-        s=df["Percent (%)"].fillna(0).sum()
-        w=df["Percent (%)"].fillna(0)/s
+        w=df["Percent (%)"].fillna(0)/df["Percent (%)"].fillna(0).sum()
     else:
         w=pd.Series([1.0/n]*n, index=df.index)
     df["weight"]=w
@@ -609,8 +632,9 @@ def holdings_editor(currency_symbol, total_value):
 
     st.markdown(
         f"**Holdings**  \n"
-        f"<span class='small-muted'>Enter <b>Ticker</b> and either <b>Percent (%)</b> or <b>Amount ({currency_symbol})</b>. "
-        f"Set a total value to auto-sync % and {currency_symbol}.</span>", unsafe_allow_html=True)
+        f"<span class='small-muted'>Enter <b>Ticker</b> and either <b>Percent (%)</b> or "
+        f"<b>Amount ({currency_symbol})</b>. Set a total value to auto-sync.</span>",
+        unsafe_allow_html=True)
 
     sync_mode = st.segmented_control(
         "Sync mode", options=["Auto","Percent → Amount","Amount → Percent"], default="Auto",
@@ -670,18 +694,19 @@ def app_portfolio():
         custom_raw = st.text_area("Custom peers (comma-separated)", "") \
                       if universe_mode=="Custom (paste list)" else ""
 
-    # Auto run
     tickers = df_hold["ticker"].tolist()
     with st.status("Crunching the numbers…", expanded=True) as status:
         prog = st.progress(0)
         status.update(label="Building peer universe…")
         universe, bench, label = build_universe(tickers, universe_mode, peer_n, custom_raw); prog.progress(8)
 
-        status.update(label="Downloading prices…")
-        prices, ok = fetch_prices_chunked_with_fallback(universe, period=history, interval="1d",
-                                                        chunk=50, min_ok=min(80, max(50, int(peer_n*0.5))))
+        status.update(label="Downloading prices (2-pass)…")
+        prices, ok = fetch_prices_chunked_with_fallback(
+            universe, period=history, interval="1d",
+            chunk=40, min_ok=min(110, max(70, int(peer_n*0.6))), retry_singles=True
+        )
         if prices.empty: st.error("No prices fetched."); return
-        prog.progress(35)
+        prog.progress(40)
 
         status.update(label="Computing technicals…")
         panel_all = {t: prices[t].dropna() for t in prices.columns if t in prices.columns and prices[t].dropna().size>0}
@@ -690,7 +715,7 @@ def app_portfolio():
             if col in tech_all.columns: tech_all[f"{col}_z"] = zscore_series(tech_all[col])
         TECH_score_all = tech_all[[c for c in ["dma_gap_z","macd_hist_z","rsi_strength_z","mom12m_z"]
                                    if c in tech_all.columns]].mean(axis=1)
-        prog.progress(58)
+        prog.progress(62)
 
         status.update(label="Fetching fundamentals…")
         fund_raw_all = fetch_fundamentals_simple(list(panel_all.keys()))
@@ -701,18 +726,16 @@ def app_portfolio():
         for col in ["trailingPE","forwardPE","debtToEquity"]:
             if col in fund_raw_all.columns: fdf_all[f"{col}_z"]=zscore_series(-fund_raw_all[col])
         FUND_score_all = fdf_all.mean(axis=1) if len(fdf_all.columns) else pd.Series(0.0, index=fund_raw_all.index)
-        prog.progress(75)
+        prog.progress(82)
 
         status.update(label="Assessing macro regime…")
         vix_series = fetch_vix_series(period="6mo", interval="1d")
         MACRO, _, _, _ = macro_from_vix(vix_series)
         prog.progress(100); status.update(label="Done!", state="complete")
 
-    # Banner
     st.markdown(f'<div class="banner">Peers loaded: <b>{len(panel_all)}</b> &nbsp;|&nbsp; '
                 f'Benchmark: <b>{bench}</b> &nbsp;|&nbsp; Peer set: <b>{label}</b></div>', unsafe_allow_html=True)
 
-    # Compose per-name scores
     idx_all = pd.Index(list(panel_all.keys()))
     out_all = pd.DataFrame(index=idx_all)
     out_all["FUND_score"]  = FUND_score_all.reindex(idx_all).fillna(0.0)
@@ -772,17 +795,14 @@ def app_portfolio():
         st.dataframe(show.round(4), use_container_width=True)
         st.markdown("**Diversification explained**")
         st.markdown(
-            f"- **Sector HHI** converts to an effective number of sectors ≈ {effN:.1f}. "
-            f"More sectors → higher score (your sector diversity score = {sector_div:.2f}).\n"
-            f"- **Name concentration**: your largest position ≈ {max_w*100:.1f}%. "
-            f"Lower concentration is better (score = {name_div:.2f}).\n"
-            f"- **Correlation**: average pairwise correlation ≈ "
-            f"{('%.2f' % avg_corr) if not np.isnan(avg_corr) else 'N/A'}. "
-            f"Lower correlation improves diversification (score = {corr_div:.2f}).\n"
+            f"- **Sector mix** → effective number of sectors ≈ **{effN:.1f}** → sector diversity score **{sector_div:.2f}**.  \n"
+            f"- **Name concentration** → max single position ≈ **{max_w*100:.1f}%** → score **{name_div:.2f}**.  \n"
+            f"- **Correlation** → average pairwise correlation ≈ "
+            f"{('%.2f' % avg_corr) if not np.isnan(avg_corr) else 'N/A'} → score **{corr_div:.2f}**.  \n"
             f"- **Diversification score** = 50% sector + 30% correlation + 20% name concentration."
         )
 
-    # Charts
+    # Portfolio charts with titles
     px_held = prices[tickers].dropna(how="all")
     r = px_held.pct_change().fillna(0)
     w_vec = weights.reindex(px_held.columns).fillna(0).values
@@ -790,14 +810,20 @@ def app_portfolio():
     eq = (1+port_r).cumprod()
     tabs = st.tabs(["Cumulative", "Volatility (60d) & Sharpe", "Drawdown"])
     with tabs[0]:
-        st.line_chart(pd.DataFrame({"Portfolio cumulative": eq}))
+        st.subheader("Cumulative growth (set = 1.0)")
+        st.line_chart(pd.DataFrame({"Portfolio cumulative": eq}), use_container_width=True)
+        st.caption("Growth of 1.0 invested, using your current weights over the chosen history.")
     with tabs[1]:
+        st.subheader("Volatility & rolling Sharpe (60-day)")
         vol60 = port_r.rolling(60).std()*np.sqrt(252)
         sharpe60 = (port_r.rolling(60).mean()/port_r.rolling(60).std())*np.sqrt(252)
-        st.line_chart(pd.DataFrame({"Volatility 60d (ann.)": vol60, "Sharpe 60d": sharpe60}))
+        st.line_chart(pd.DataFrame({"Volatility 60d (ann.)": vol60, "Sharpe 60d": sharpe60}), use_container_width=True)
+        st.caption("Lower volatility & higher Sharpe are preferred.")
     with tabs[2]:
+        st.subheader("Drawdown")
         roll_max = eq.cummax(); dd = eq/roll_max - 1
-        st.line_chart(pd.DataFrame({"Drawdown": dd}))
+        st.line_chart(pd.DataFrame({"Drawdown": dd}), use_container_width=True)
+        st.caption("Depth of falls from prior peaks (risk perspective).")
 
 # -------------- Router --------------
 def app_router():
