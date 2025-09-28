@@ -1,4 +1,4 @@
-# app.py — ⭐️ Rate My Stock (no Relative; auto-run; loading; chart explanations; macro level+trend)
+# app.py — ⭐️ Rate My Stock (no Relative; auto-run; loading; chart explanations; macro level+trend + macro explanation in "Why this rating")
 
 import io
 import time
@@ -276,15 +276,6 @@ def macro_overlay_score_from_series(vix_series: pd.Series) -> tuple[float, float
     return macro, level_score, trend_score
 
 # -------------------- Friendly explainers --------------------
-FRIENDLY_NAMES = {
-    "FUND_score":  "Fundamentals",
-    "TECH_score":  "Technicals",
-    "MACRO_score": "Macro (VIX)",
-    "COMPOSITE":   "Composite",
-    "RATING_0_100":"Score (0–100)",
-    "RECO":        "Recommendation",
-}
-
 def label_badge(value, pos_thresh=None, neg_thresh=None, higher_is_better=True, units=""):
     v = value
     if pd.isna(v): return "⚪ Neutral"
@@ -460,15 +451,18 @@ def main_app():
 
     # Header status
     vix_last = float(vix_series.iloc[-1]) if vix_series is not None and not vix_series.empty else np.nan
+    vix_ema20 = float(ema(vix_series, 20).iloc[-1]) if vix_series is not None and not vix_series.empty else np.nan
     vix_txt = f"{vix_last:.2f}" if not np.isnan(vix_last) else "N/A"
-    st.success(f"VIX: {vix_txt}  |  Macro score (level+trend): {MACRO_score_val:.2f}  "
-               f"(level={MACRO_level:.2f}, trend={MACRO_trend:.2f})  |  Peers loaded: {len(panel)}")
+    st.success(
+        f"VIX: {vix_txt}  |  Macro score (level+trend): {MACRO_score_val:.2f}  "
+        f"(level={MACRO_level:.2f}, trend={MACRO_trend:.2f})  |  Peers loaded: {len(panel)}"
+    )
 
     # Ratings table
     st.markdown("## 🏁 Ratings")
     st.dataframe(pretty.round(4), use_container_width=True)
 
-    # Why this rating
+    # Why this rating (now includes Macro explanation)
     st.markdown("## 🔍 Why this rating?")
     for t in show_idx:
         reco = table.loc[t, "RECO"]; sc = table.loc[t, "RATING_0_100"]
@@ -514,6 +508,23 @@ def main_app():
                 st.markdown("**Interpretation**")
                 st.markdown(explain_technicals_row(tech.loc[t, ["dma_gap","macd_hist","rsi_strength","mom12m"]].to_dict()))
 
+            # --- NEW: Macro explanation ---
+            st.markdown("**Macro (VIX) — level & trend**")
+            if not np.isnan(vix_last):
+                rel_gap = (vix_last - vix_ema20) / vix_ema20 if (not np.isnan(vix_ema20) and vix_ema20 != 0) else np.nan
+                mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+                mcol1.metric("Current VIX", f"{vix_last:.2f}")
+                mcol2.metric("VIX vs EMA20", f"{(rel_gap*100):.1f}%" if not np.isnan(rel_gap) else "N/A")
+                mcol3.metric("Level score", f"{MACRO_level:.2f}")
+                mcol4.metric("Trend score", f"{MACRO_trend:.2f}")
+                st.caption(
+                    "Level maps today’s VIX to a 0–1 scale (12→1.0, 28→0.0). "
+                    "Trend compares VIX to its 20-day EMA: rising above trend reduces the score (risk building), "
+                    "falling below trend boosts it (risk easing). Macro score is 70% level + 30% trend."
+                )
+            else:
+                st.caption("Macro details unavailable (VIX not loaded).")
+
     # ---------- Charts tabs (with explanations) ----------
     if show_idx:
         sel = st.selectbox("Choose ticker for charts", show_idx, index=0)
@@ -542,7 +553,7 @@ def main_app():
                 vol60 = r.rolling(60).std() * np.sqrt(252)
                 sharpe60 = (r.rolling(60).mean() / r.rolling(60).std()) * np.sqrt(252)
                 st.line_chart(pd.DataFrame({"Volatility 60d (ann.)": vol60, "Sharpe 60d": sharpe60}))
-                st.caption("Risk and risk-adjusted return using a simple 60-day window. Higher Sharpe = better reward per unit of volatility.")
+                st.caption("Risk and risk-adjusted return using a 60-day window. Higher Sharpe = better reward per unit of volatility.")
 
             with tabs[3]:
                 roll_max = px.cummax()
