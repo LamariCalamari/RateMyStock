@@ -1,4 +1,4 @@
-# app.py — ⭐️ Rate My Stock (REL fix + Macro trend + charts + loading)
+# app.py — ⭐️ Rate My Stock (no Relative; auto-run; loading; chart explanations; macro level+trend)
 
 import io
 import time
@@ -218,41 +218,6 @@ def technical_scores(price_panel: dict) -> pd.DataFrame:
                      "rsi_strength": rsi_strength, "mom12m": mom12m})
     return pd.DataFrame(rows).set_index("ticker") if rows else pd.DataFrame()
 
-def rolling_beta_alpha(stock_px: pd.Series, bench_px: pd.Series, window: int = 60):
-    df = pd.DataFrame({"r_s": stock_px.pct_change(), "r_b": bench_px.pct_change()}).dropna()
-    out = []
-    for i in range(window, len(df)):
-        chunk = df.iloc[i-window:i]
-        if chunk["r_b"].std(ddof=0) == 0:
-            beta = np.nan
-        else:
-            cov = np.cov(chunk["r_s"], chunk["r_b"])[0, 1]
-            beta = cov / np.var(chunk["r_b"])
-        alpha = df["r_s"].iloc[i] - (beta * df["r_b"].iloc[i] if pd.notna(beta) else 0.0)
-        out.append((df.index[i], beta, alpha))
-    return pd.DataFrame(out, columns=["date", "beta", "alpha"]).set_index("date")
-
-def relative_signals(stock_px: pd.Series, bench_px: pd.Series):
-    # Align to exact common dates to avoid accidental empty joins
-    common_idx = stock_px.index.intersection(bench_px.index)
-    s = stock_px.reindex(common_idx).dropna()
-    b = bench_px.reindex(common_idx).dropna()
-    ratio = (s / b).dropna()
-
-    d = {"rel_dma_gap": np.nan, "rel_mom12m": np.nan, "alpha_60d": np.nan}
-    if len(ratio) >= 60:
-        ema100 = ratio.ewm(span=100, adjust=False).mean()
-        base = ema100.iloc[-1] if pd.notna(ema100.iloc[-1]) and ema100.iloc[-1] != 0 else np.nan
-        d["rel_dma_gap"] = (ratio.iloc[-1] - ema100.iloc[-1]) / base if pd.notna(base) else np.nan
-    if len(ratio) > 252:
-        d["rel_mom12m"] = ratio.iloc[-1] / ratio.iloc[-253] - 1.0
-
-    ba = rolling_beta_alpha(s, b, window=60)
-    if not ba.empty and "alpha" in ba:
-        salpha = ba["alpha"].dropna()
-        if salpha.size: d["alpha_60d"] = salpha.iloc[-1]
-    return d
-
 # --------------------- FUNDAMENTALS (robust .info) ---------------------
 @st.cache_data(show_spinner=False)
 def fetch_fundamentals_simple(tickers):
@@ -283,7 +248,7 @@ def macro_overlay_score_from_series(vix_series: pd.Series) -> tuple[float, float
     """
     Returns (macro_score, level_score, trend_score)
     - Level: maps VIX level 12->1.0, 28->0.0 linearly
-    - Trend: compares last vs EMA20 (rising VIX lowers score)
+    - Trend: compares last vs EMA20 (rising VIX penalizes)
     Macro = 0.7*Level + 0.3*Trend
     """
     if vix_series is None or vix_series.empty:
@@ -299,12 +264,10 @@ def macro_overlay_score_from_series(vix_series: pd.Series) -> tuple[float, float
     ema20 = ema(vix_series, 20)
     vix_ema = float(ema20.iloc[-1]) if not np.isnan(ema20.iloc[-1]) else vix_last
     rel_gap = (vix_last - vix_ema) / max(vix_ema, 1e-9)  # positive = rising vs trend
-    # Map rel_gap to [0,1] where rising VIX penalizes: 0.0 at +30%, 1.0 at -10% or lower
-    # Linear piecewise clamp
+    # Map rel_gap to [0,1]: 0.0 at +30%, 1.0 at -10% or lower, linear in between
     if rel_gap >= 0.30: trend_score = 0.0
     elif rel_gap <= -0.10: trend_score = 1.0
     else:
-        # between -10% and +30%: descend from 1.0 to 0.0
         trend_score = 1.0 - (rel_gap + 0.10) / 0.40
         trend_score = float(np.clip(trend_score, 0.0, 1.0))
 
@@ -312,11 +275,10 @@ def macro_overlay_score_from_series(vix_series: pd.Series) -> tuple[float, float
     macro = float(np.clip(macro, 0.0, 1.0))
     return macro, level_score, trend_score
 
-# -------------------- Friendly labels & explainers --------------------
+# -------------------- Friendly explainers --------------------
 FRIENDLY_NAMES = {
     "FUND_score":  "Fundamentals",
     "TECH_score":  "Technicals",
-    "REL_score":   "Relative vs Benchmark",
     "MACRO_score": "Macro (VIX)",
     "COMPOSITE":   "Composite",
     "RATING_0_100":"Score (0–100)",
@@ -339,7 +301,7 @@ def label_badge(value, pos_thresh=None, neg_thresh=None, higher_is_better=True, 
 
 def explain_technicals_row(row):
     notes = []
-    notes.append(f"• **Price vs EMA(100)**: {label_badge(row.get('dma_gap'), pos_thresh=0)}. Above EMA suggests trend strength; below can flag weakness or value entry.")
+    notes.append(f"• **Price vs EMA(100)**: {label_badge(row.get('dma_gap'), pos_thresh=0)}. Above EMA suggests trend strength; below can flag weakness or potential value entry.")
     notes.append(f"• **MACD histogram**: {label_badge(row.get('macd_hist'), pos_thresh=0)}. Positive = momentum building; negative = fading.")
     rsi_strength = row.get("rsi_strength")
     rsi_val = 50 + 50*rsi_strength if pd.notna(rsi_strength) else None
@@ -353,13 +315,6 @@ def explain_technicals_row(row):
     notes.append(f"• **12-month momentum**: {label_badge(row.get('mom12m'), pos_thresh=0)} vs its own past year.")
     return "\n".join(notes)
 
-def explain_relative_row(row):
-    notes = []
-    notes.append(f"• **Ratio EMA gap (stock/benchmark)**: {label_badge(row.get('rel_dma_gap'), pos_thresh=0)}.")
-    notes.append(f"• **12-month relative momentum**: {label_badge(row.get('rel_mom12m'), pos_thresh=0)}.")
-    notes.append(f"• **Rolling alpha (60d)**: {label_badge(row.get('alpha_60d'), pos_thresh=0)}. Positive = beating benchmark recently on a risk-adjusted basis.")
-    return "\n".join(notes)
-
 # --------------------------- Landing ---------------------------
 def landing():
     st.markdown('<div class="hero"><h1>⭐️ Rate My Stock</h1></div>', unsafe_allow_html=True)
@@ -371,9 +326,10 @@ def landing():
 
 # --------------------------- Main App --------------------------
 def main_app():
-    # Centered input
+    # Centered input (auto-run — no button)
     st.markdown('<div class="search-wrap"><div class="search-inner">', unsafe_allow_html=True)
-    ticker = st.text_input(" ", "AAPL", key="ticker", label_visibility="collapsed", placeholder="Type a ticker (e.g., AAPL)")
+    ticker = st.text_input(" ", "AAPL", key="ticker", label_visibility="collapsed",
+                           placeholder="Type a ticker (e.g., AAPL)")
     st.markdown('</div></div>', unsafe_allow_html=True)
 
     # Settings (collapsed)
@@ -389,27 +345,22 @@ def main_app():
             peer_sample_n = st.slider("Peer sample size", 30, 200, 120, 10)
         with c3:
             history = st.selectbox("History", ["1y", "2y", "5y"], index=0)
-        c4, c5, c6, c7 = st.columns(4)
+        c4, c5, c6 = st.columns(3)
         with c4:
-            benchmark = st.selectbox("Benchmark (for REL)", ["SPY","^GSPC","QQQ","^IXIC","^DJI"], index=0)
-        with c5:
             w_fund = st.slider("Weight: Fundamentals", 0.0, 1.0, 0.5, 0.05)
+        with c5:
+            w_tech = st.slider("Weight: Technicals", 0.0, 1.0, 0.40, 0.05)
         with c6:
-            w_tech = st.slider("Weight: Technicals", 0.0, 1.0, 0.35, 0.05)
-        with c7:
             w_macro = st.slider("Weight: Macro (VIX)", 0.0, 1.0, 0.10, 0.05)
-        w_rel = st.slider("Weight: Relative vs Benchmark", 0.0, 1.0, 0.05, 0.05)
         custom_raw = ""
         if universe_mode == "Custom (paste list)":
             custom_raw = st.text_area("Custom peers (comma-separated)", "AMD, AVGO, COST, CRM, NFLX")
         show_debug = st.checkbox("Show debug info", value=False)
 
-    # Big button
-    st.markdown('<div class="search-wrap"><div class="search-inner">', unsafe_allow_html=True)
-    run_btn = st.button("Rate it 🚀", type="primary", use_container_width=True)
-    st.markdown('</div></div>', unsafe_allow_html=True)
-
-    if not run_btn:
+    # Auto-run logic: run when a ticker is present (no button)
+    user_tickers = [t.strip().upper() for t in ticker.split(",") if t.strip()]
+    if not user_tickers:
+        st.info("Enter a ticker above to run the rating.")
         return
 
     # ------------------- Loading status -------------------
@@ -418,10 +369,6 @@ def main_app():
 
         # Build universe
         status.update(label="Building peer universe…")
-        user_tickers = [t.strip().upper() for t in ticker.split(",") if t.strip()]
-        if not user_tickers:
-            st.error("Please enter a ticker.")
-            return
         universe = build_universe(user_tickers, universe_mode, peer_sample_n, custom_raw)
         prog.progress(10)
 
@@ -435,7 +382,6 @@ def main_app():
         prog.progress(40)
 
         if len(panel) < 10:
-            # Retry with bigger S&P fallback set to guarantee cross-section
             status.update(label="Retrying with larger peer set…")
             retry_universe = sorted(set([*user_tickers, *SP500_FALLBACK]))[:max(peer_sample_n, 120)]
             prices2, ok2, _ = fetch_prices_chunked_with_fallback(retry_universe, period="1y", interval="1d",
@@ -445,15 +391,6 @@ def main_app():
         if not panel:
             st.error("No peer prices loaded.")
             return
-
-        # Benchmark
-        status.update(label="Loading benchmark…")
-        bench_px = fetch_price_series(benchmark, period=history, interval="1d")
-        used_bench = benchmark
-        if bench_px.empty:
-            bench_px = fetch_price_series("SPY", period=history, interval="1d")
-            used_bench = "SPY"
-        prog.progress(55)
 
         # Technicals
         status.update(label="Computing technicals…")
@@ -474,46 +411,28 @@ def main_app():
         for col in ["trailingPE","forwardPE","debtToEquity"]:
             if col in fund_raw.columns: fdf[f"{col}_z"] = zscore_series(-fund_raw[col])
         FUND_score = fdf.mean(axis=1) if len(fdf.columns) else pd.Series(0.0, index=fund_raw.index)
-        prog.progress(82)
+        prog.progress(85)
 
-        # Relative — FIXED: robust intersection + 60d min + SPY fallback already handled
-        status.update(label="Computing relative vs benchmark…")
-        rel_rows = []
-        if not bench_px.empty:
-            for t, px in panel.items():
-                feats = relative_signals(px, bench_px)
-                rel_rows.append({"ticker": t, **feats})
-        else:
-            rel_rows = [{"ticker": t, "rel_dma_gap": np.nan, "rel_mom12m": np.nan, "alpha_60d": np.nan} for t in panel.keys()]
-        rel = pd.DataFrame(rel_rows).set_index("ticker")
-        for c in ["rel_dma_gap", "rel_mom12m", "alpha_60d"]:
-            if c in rel.columns: rel[f"{c}_z"] = zscore_series(rel[c])
-        # IMPORTANT: don't drop to 0 until the final combine; keep NaNs here
-        REL_score = rel[[c for c in ["rel_dma_gap_z","rel_mom12m_z","alpha_60d_z"] if c in rel.columns]].mean(axis=1)
-        prog.progress(90)
-
-        # Macro: level + trend adj
+        # Macro (VIX level + trend)
         status.update(label="Assessing macro regime…")
         vix_series = fetch_vix_series(period="6mo", interval="1d")
         MACRO_score_val, MACRO_level, MACRO_trend = macro_overlay_score_from_series(vix_series)
-        prog.progress(95)
 
-        # Combine
+        # Combine (NO RELATIVE)
         idx = pd.Index(list(panel.keys()))
         out = pd.DataFrame(index=idx)
         out["FUND_score"]  = FUND_score.reindex(idx).fillna(0.0)
         out["TECH_score"]  = TECH_score.reindex(idx).fillna(0.0)
-        out["REL_score"]   = REL_score.reindex(idx).fillna(0.0)  # Only fill NaN here
         out["MACRO_score"] = MACRO_score_val
 
-        # weights normalized
-        wsum = (w_fund + w_tech + w_rel + w_macro)
+        # weights normalized across FUND/TECH/MACRO
+        wsum = (w_fund + w_tech + w_macro)
         if wsum == 0:
             st.error("All weights are zero. Increase at least one component.")
             return
-        wf, wt, wr, wm = w_fund/wsum, w_tech/wsum, w_rel/wsum, w_macro/wsum
+        wf, wt, wm = w_fund/wsum, w_tech/wsum, w_macro/wsum
 
-        out["COMPOSITE"] = wf*out["FUND_score"] + wt*out["TECH_score"] + wr*out["REL_score"] + wm*out["MACRO_score"]
+        out["COMPOSITE"] = wf*out["FUND_score"] + wt*out["TECH_score"] + wm*out["MACRO_score"]
         out["RATING_0_100"] = percentile_rank(out["COMPOSITE"])
 
         def bucket(x):
@@ -524,10 +443,17 @@ def main_app():
             return "Strong Sell"
         out["RECO"] = out["RATING_0_100"].apply(bucket)
 
-        # filter to requested tickers
+        # filter to requested tickers (scores are vs peers)
         show_idx = [yf_symbol(t) for t in user_tickers if yf_symbol(t) in out.index]
         table = out.reindex(show_idx).sort_values("RATING_0_100", ascending=False)
-        pretty = table.rename(columns=FRIENDLY_NAMES)
+        pretty = table.rename(columns={
+            "FUND_score":"Fundamentals",
+            "TECH_score":"Technicals",
+            "MACRO_score":"Macro (VIX)",
+            "COMPOSITE":"Composite",
+            "RATING_0_100":"Score (0–100)",
+            "RECO":"Recommendation"
+        })
 
         prog.progress(100)
         status.update(label="Done!", state="complete")
@@ -535,7 +461,8 @@ def main_app():
     # Header status
     vix_last = float(vix_series.iloc[-1]) if vix_series is not None and not vix_series.empty else np.nan
     vix_txt = f"{vix_last:.2f}" if not np.isnan(vix_last) else "N/A"
-    st.success(f"VIX: {vix_txt} (level/trend mix → {MACRO_score_val:.2f}) | Benchmark: {used_bench} | Peers loaded: {len(panel)}")
+    st.success(f"VIX: {vix_txt}  |  Macro score (level+trend): {MACRO_score_val:.2f}  "
+               f"(level={MACRO_level:.2f}, trend={MACRO_trend:.2f})  |  Peers loaded: {len(panel)}")
 
     # Ratings table
     st.markdown("## 🏁 Ratings")
@@ -546,13 +473,12 @@ def main_app():
     for t in show_idx:
         reco = table.loc[t, "RECO"]; sc = table.loc[t, "RATING_0_100"]
         with st.expander(f"{t} — {reco} (Score: {sc:.1f})"):
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3 = st.columns(3)
             c1.metric("Fundamentals", f"{table.loc[t,'FUND_score']:.3f}")
             c2.metric("Technicals",   f"{table.loc[t,'TECH_score']:.3f}")
-            c3.metric("Relative vs Benchmark", f"{table.loc[t,'REL_score']:.3f}")
-            c4.metric("Macro (VIX)",  f"{table.loc[t,'MACRO_score']:.3f}")
+            c3.metric("Macro (VIX)",  f"{table.loc[t,'MACRO_score']:.3f}")
 
-            # FUND details
+            # FUND details (vs peers)
             if t in fdf.index and len(fdf.columns):
                 fmap = {
                     "revenueGrowth_z":"Revenue growth (YoY)",
@@ -588,58 +514,41 @@ def main_app():
                 st.markdown("**Interpretation**")
                 st.markdown(explain_technicals_row(tech.loc[t, ["dma_gap","macd_hist","rsi_strength","mom12m"]].to_dict()))
 
-            # REL details + interpretation
-            if t in rel.index and rel.loc[t][["rel_dma_gap","rel_mom12m","alpha_60d"]].notna().any():
-                rmap = {"rel_dma_gap_z":"Ratio EMA gap", "rel_mom12m_z":"Relative momentum (12m)", "alpha_60d_z":"Rolling alpha (60d)"}
-                rseries = {nice: float(rel.loc[t, raw]) for raw, nice in rmap.items()
-                           if raw in rel.columns and pd.notna(rel.loc[t, raw])}
-                if rseries:
-                    st.markdown("**Relative to benchmark (vs peers)**")
-                    st.table(pd.Series(rseries, name=t).round(3))
-                    st.markdown("**Interpretation**")
-                    st.markdown(explain_relative_row(rel.loc[t].to_dict()))
-            else:
-                st.caption("Relative details not available (insufficient overlap).")
-
-    # ---------- Charts tabs ----------
+    # ---------- Charts tabs (with explanations) ----------
     if show_idx:
         sel = st.selectbox("Choose ticker for charts", show_idx, index=0)
         px = panel.get(sel)
         if px is not None and not px.empty:
-            bench = bench_px.reindex(px.index) if not bench_px.empty else None
-            tabs = st.tabs(["Price & EMAs", "Cumulative vs Benchmark", "Volatility & Sharpe (60d)", "Drawdown", "Relative ratio"])
+            tabs = st.tabs([
+                "Price & EMAs",
+                "Cumulative (Stock)",
+                "Volatility & Sharpe (60d)",
+                "Drawdown"
+            ])
 
             with tabs[0]:
                 ema20, ema100 = ema(px, 20), ema(px, 100)
                 st.line_chart(pd.DataFrame({"Price": px, "EMA20": ema20, "EMA100": ema100}))
+                st.caption("Price with short/medium trend proxies. Above EMA lines often indicates trend strength; below can suggest weakness or a value entry (context matters).")
 
             with tabs[1]:
-                if bench is not None and not bench.empty:
-                    stock_rets = px.pct_change().fillna(0)
-                    bench_rets = bench.pct_change().fillna(0)
-                    equity_stock = (1 + stock_rets).cumprod()
-                    equity_bench = (1 + bench_rets).cumprod()
-                    st.line_chart(pd.DataFrame({"Stock (cum)": equity_stock, "Benchmark (cum)": equity_bench}))
-                else:
-                    st.info("Benchmark not available for this chart.")
+                r = px.pct_change().fillna(0)
+                equity = (1 + r).cumprod()
+                st.line_chart(pd.DataFrame({"Cumulative return": equity}))
+                st.caption("Cumulative growth of ₤1 invested in the stock over the selected period.")
 
             with tabs[2]:
                 r = px.pct_change()
                 vol60 = r.rolling(60).std() * np.sqrt(252)
                 sharpe60 = (r.rolling(60).mean() / r.rolling(60).std()) * np.sqrt(252)
                 st.line_chart(pd.DataFrame({"Volatility 60d (ann.)": vol60, "Sharpe 60d": sharpe60}))
+                st.caption("Risk and risk-adjusted return using a simple 60-day window. Higher Sharpe = better reward per unit of volatility.")
 
             with tabs[3]:
                 roll_max = px.cummax()
                 drawdown = (px/roll_max - 1.0)
                 st.line_chart(pd.DataFrame({"Drawdown": drawdown}))
-
-            with tabs[4]:
-                if bench is not None and not bench.empty:
-                    ratio = (px / bench).dropna()
-                    st.line_chart(pd.DataFrame({"Stock/Benchmark": ratio}))
-                else:
-                    st.info("Benchmark not available for this chart.")
+                st.caption("Peak-to-trough declines. Deeper or longer drawdowns mean a tougher ride for investors.")
         else:
             st.warning("No price data for chart.")
 
@@ -660,7 +569,7 @@ def app_router():
         landing()
     else:
         st.title("⭐️ Rate My Stock")
-        st.caption("Type a ticker. We’ll grab its peers from the index and rate it with friendly explanations.")
+        st.caption("Type a ticker. We’ll grab its peers and rate it with friendly explanations.")
         main_app()
 
 app_router()
