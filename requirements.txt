@@ -1,8 +1,13 @@
-streamlit==1.37.1
-yfinance
-pandas
-numpy
-requests
-openpyxl
-matplotlib
-lxml
+# Streamlit core + plotting
+streamlit>=1.33,<2
+matplotlib>=3.8,<3.9
+
+# Data stack
+pandas>=2.2,<3
+numpy>=1.26,<3
+openpyxl>=3.1,<3
+
+# Data fetching
+yfinance>=0.2.43
+requests>=2.32,<3
+lxml>=4.9,<6
