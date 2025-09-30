@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
+import streamlit.components.v1 as components
 
 # ==================== Global CSS & Brand ====================
 
@@ -15,6 +16,9 @@ def inject_css():
         """
         <style>
         .block-container{max-width:1140px;}
+
+        /* Hide the tiny 'app' pill above the page list in the sidebar */
+        [data-testid="stSidebarNav"] > div:first-child { display:none !important; }
 
         /* Brand header: logo next to title, centered */
         .brand{
@@ -25,10 +29,11 @@ def inject_css():
           font-size:56px;margin:0;line-height:1;
           background:linear-gradient(90deg,#e74c3c 0%, #f39c12 50%, #2ecc71 100%);
           -webkit-background-clip:text;background-clip:text;color:transparent;
+          letter-spacing:.3px;
         }
         .logo{width:56px;height:52px;flex:0 0 auto;}
 
-        /* KPI + misc */
+        /* KPI + misc (from your original) */
         .kpi-card{padding:1rem 1.1rem;border-radius:12px;background:#111418;border:1px solid #222}
         .kpi-num{font-size:2.2rem;font-weight:800;margin-top:.25rem}
         .small-muted{color:#9aa0a6;font-size:.9rem}
@@ -36,11 +41,30 @@ def inject_css():
         .chart-caption{color:#9aa0a6;margin:-.5rem 0 1rem}
         .topbar{display:flex;justify-content:flex-end;margin:.2rem 0 .6rem}
 
-        /* Optional: colorize page links text with the same gradient vibe */
-        a[data-testid="stPageLink"] span{
-          background:linear-gradient(90deg,#e74c3c 0%, #f39c12 50%, #2ecc71 100%);
-          -webkit-background-clip:text;background-clip:text;color:transparent;
-          font-weight:700;
+        /* CTA row — center & keep items on one line */
+        .cta-row{
+          display:flex;gap:16px;justify-content:center;align-items:center;flex-wrap:wrap;margin:4px 0 18px;
+        }
+        /* Turn st.page_link anchors into card-like buttons */
+        #ctas a[data-testid="stPageLink"]{
+          display:inline-flex;align-items:center;gap:.55rem;
+          padding:14px 18px;border-radius:14px;text-decoration:none;font-weight:800;
+          border:1px solid #2e3238;background:#15181d;color:#e9edf0;
+          box-shadow:0 1px 0 rgba(255,255,255,.06) inset, 0 8px 24px rgba(0,0,0,.35);
+          transition:transform .08s ease, box-shadow .16s ease, border-color .12s ease, background .12s ease;
+        }
+        #ctas a[data-testid="stPageLink"]:hover{
+          transform:translateY(-1px);
+          box-shadow:0 1px 0 rgba(255,255,255,.08) inset, 0 12px 28px rgba(0,0,0,.45);
+          border-color:#3b4148;background:#1a1f26;
+        }
+        /* Make the first CTA “primary” with the brand gradient */
+        #ctas a[data-testid="stPageLink"]:first-child{
+          background:linear-gradient(90deg,#e85d58 0%,#f39c12 50%,#2ecc71 100%);
+          color:#111;border:1px solid #ffb48a;
+        }
+        #ctas a[data-testid="stPageLink"]:first-child:hover{
+          filter:saturate(1.05) brightness(1.05);
         }
         </style>
         """,
@@ -62,11 +86,9 @@ def inline_logo_svg() -> str:
 
 
 def brand_header(title: str):
-    """Centered logo + H1 title in a single flex row.
-    IMPORTANT: no leading whitespace before the <div> to avoid Markdown code blocks.
-    """
+    """Render the brand header with components.html to avoid any Markdown escaping."""
     html = f"""<div class="brand">{inline_logo_svg()}<h1>{title}</h1></div>"""
-    st.markdown(html, unsafe_allow_html=True)
+    components.html(html, height=80, scrolling=False)
 
 
 def topbar_back(label: str = "← Back", url: str | None = None):
@@ -75,7 +97,8 @@ def topbar_back(label: str = "← Back", url: str | None = None):
         st.page_link(url, label=label)
     st.markdown("</div>", unsafe_allow_html=True)
 
-# ==================== Finance Helpers ====================
+
+# ==================== Finance Helpers (unchanged core logic) ====================
 
 def yf_symbol(t: str) -> str:
     if not isinstance(t, str):
@@ -225,16 +248,9 @@ def fetch_vix_series(period: str = "6mo", interval: str = "1d") -> pd.Series:
 @st.cache_data(show_spinner=False)
 def fetch_fundamentals_simple(tickers: List[str]) -> pd.DataFrame:
     keep = [
-        "revenueGrowth",
-        "earningsGrowth",
-        "returnOnEquity",
-        "profitMargins",
-        "grossMargins",
-        "operatingMargins",
-        "ebitdaMargins",
-        "trailingPE",
-        "forwardPE",
-        "debtToEquity",
+        "revenueGrowth","earningsGrowth","returnOnEquity",
+        "profitMargins","grossMargins","operatingMargins","ebitdaMargins",
+        "trailingPE","forwardPE","debtToEquity",
     ]
     rows = []
     for raw in tickers:
@@ -262,8 +278,7 @@ NASDAQ100_FALLBACK = ["AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","AVGO","
 def list_sp500() -> set:
     try:
         got = {yf_symbol(t) for t in yf.tickers_sp500()}
-        if got:
-            return got
+        if got: return got
     except Exception:
         pass
     return set(SP500_FALLBACK)
@@ -271,18 +286,16 @@ def list_sp500() -> set:
 def list_dow30() -> set:
     try:
         got = {yf_symbol(t) for t in yf.tickers_dow()}
-        if got:
-            return got
+        if got: return got
     except Exception:
         pass
     return set(DOW30_FALLBACK)
 
 def list_nasdaq100() -> set:
     try:
-        if hasattr(yf, "tickers_nasdaq"):
+        if hasattr(yf,"tickers_nasdaq"):
             got = {yf_symbol(t) for t in yf.tickers_nasdaq()}
-            if got:
-                return got
+            if got: return got
     except Exception:
         pass
     return set(NASDAQ100_FALLBACK)
@@ -292,16 +305,16 @@ def build_universe(
 ) -> Tuple[List[str], str]:
     user = [yf_symbol(t) for t in user_tickers]
     if mode == "S&P 500":
-        peers_all = list_sp500(); label = "S&P 500"
+        peers_all = list_sp500(); label="S&P 500"
     elif mode == "Dow 30":
-        peers_all = list_dow30(); label = "Dow 30"
+        peers_all = list_dow30(); label="Dow 30"
     elif mode == "NASDAQ 100":
-        peers_all = list_nasdaq100(); label = "NASDAQ 100"
+        peers_all = list_nasdaq100(); label="NASDAQ 100"
     elif mode == "Custom (paste list)":
         custom = {yf_symbol(t) for t in custom_raw.split(",") if t.strip()}
-        return sorted(set(user) | custom)[:350], "Custom"
+        return sorted(set(user)|custom)[:350], "Custom"
     else:
-        sp, dj, nd = list_sp500(), list_dow30(), list_nasdaq100()
+        sp,dj,nd = list_sp500(), list_dow30(), list_nasdaq100()
         auto=set(); label="S&P 500"
         if len(user)==1:
             t=user[0]
@@ -315,7 +328,7 @@ def build_universe(
                 elif t in nd: auto|=nd; label="NASDAQ 100"
         peers_all = auto if auto else sp
     peers = sorted(peers_all.difference(set(user)))[:max(1, sample_n)]
-    return sorted(set(user) | set(peers))[:350], label
+    return sorted(set(user)|set(peers))[:350], label
 
 
 # ==================== Feature Builders ====================
