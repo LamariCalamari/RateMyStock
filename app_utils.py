@@ -1,29 +1,40 @@
-# app_utils.py — shared styles + all helpers used by Home and pages
-
-import io
+# app_utils.py
 import time
 import random
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-# =====================================================================================
-# Global CSS + Sidebar "app" → "Home" script + brand header + topbar
-# =====================================================================================
+# ==================== Global CSS & Brand ====================
 
-def inject_css_and_script():
-    """Inject sitewide CSS and a robust script that renames the first sidebar item to 'Home'."""
+def inject_css():
     st.markdown(
         """
         <style>
         .block-container{max-width:1140px;}
 
-        /* Brand header (logo + gradient wordmark) */
-        .brand{ display:flex; align-items:center; justify-content:center; gap:16px; margin:1.0rem 0 .25rem; }
-        .logo{ width:56px; height:52px; flex:0 0 auto; }
+        /* Hide native 'app' pill and show our own */
+        [data-testid="stSidebarNav"] > div:first-child{ display:none !important; }
+        .pill{
+          display:inline-block; padding:8px 14px; border-radius:10px;
+          background:#2d3037; color:#e9edf0; font-weight:700; margin:6px 0 2px;
+          border:1px solid #3a3f46;
+        }
+        .pill-home{
+          background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(0,0,0,.06)) padding-box,
+                     linear-gradient(90deg,#e85d58, #f39c12, #2ecc71) border-box;
+          border:1px solid transparent; color:#f4f6f8;
+        }
+
+        /* Brand header */
+        .brand{
+          display:flex;align-items:center;justify-content:center;gap:16px;
+          margin:1.0rem 0 .25rem;
+        }
+        .logo{width:56px;height:52px;flex:0 0 auto;}
 
         /* KPI + misc (original styles) */
         .kpi-card{padding:1rem 1.1rem;border-radius:12px;background:#111418;border:1px solid #222}
@@ -33,53 +44,24 @@ def inject_css_and_script():
         .chart-caption{color:#9aa0a6;margin:-.5rem 0 1rem}
         .topbar{display:flex;justify-content:flex-end;margin:.2rem 0 .6rem}
 
-        /* ---- Home CTA Buttons (style the page links directly in main area) ---- */
-        [data-testid="stMain"] a[data-testid="stPageLink"]{
-          display:flex; align-items:center; justify-content:center; gap:.6rem;
-          padding:16px 22px; border-radius:14px; text-decoration:none; font-weight:800;
-          min-width:260px; white-space:nowrap;
-          background:linear-gradient(90deg,#e85d58, #f39c12, #2ecc71) padding-box,
-                     linear-gradient(90deg,rgba(255,255,255,.12),rgba(255,255,255,.04)) border-box;
-          border:1px solid transparent; color:#0d0f12;
-          box-shadow:0 1px 0 rgba(255,255,255,.06) inset, 0 12px 26px rgba(0,0,0,.42);
-          transition:transform .08s ease, box-shadow .16s ease, filter .12s ease;
+        /* CTA Boxes (used on Home) */
+        .cta-box{
+          display:block; text-align:center; padding:16px 18px; border-radius:14px;
+          background:#15181d; border:1px solid #2e3238; min-width:240px;
+          box-shadow:0 1px 0 rgba(255,255,255,.06) inset, 0 8px 24px rgba(0,0,0,.35);
+          transition:transform .08s ease, box-shadow .16s ease, border-color .12s ease, background .12s ease;
         }
-        [data-testid="stMain"] a[data-testid="stPageLink"]:hover{
-          transform:translateY(-1px);
-          filter:saturate(1.06) brightness(1.05);
-          box-shadow:0 1px 0 rgba(255,255,255,.08) inset, 0 16px 34px rgba(0,0,0,.50);
+        .cta-box:hover{ background:#181c22; border-color:#3a4048; transform:translateY(-1px); }
+        .cta-box a[data-testid="stPageLink"]{
+          display:inline-flex; align-items:center; gap:.6rem; font-weight:800; color:#e9edf0; text-decoration:none;
+          white-space:nowrap;
         }
-        [data-testid="stMain"] a[data-testid="stPageLink"] p{
-          margin:0 !important; color:inherit !important; font-weight:800 !important;
+        .cta-box.primary{
+          background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(0,0,0,.06)) padding-box,
+                     linear-gradient(90deg,#e85d58, #f39c12, #2ecc71) border-box;
+          border:1px solid transparent;
         }
-
-        /* Do not affect topbar back link */
-        .topbar a[data-testid="stPageLink"]{ all:unset !important; cursor:pointer; color:inherit; }
         </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # Robustly rename the first sidebar entry to "Home" on every re-render
-    st.markdown(
-        """
-        <script>
-        (function(){
-          function renameFirstSidebarItem(){
-            try{
-              const nav = document.querySelector('[data-testid="stSidebarNav"]');
-              if(!nav) return;
-              const firstLabel = nav.querySelector('ul li:first-child a p');
-              if(firstLabel && firstLabel.textContent.trim().toLowerCase() === 'app'){
-                firstLabel.textContent = 'Home';
-              }
-            }catch(e){}
-          }
-          const obs = new MutationObserver(renameFirstSidebarItem);
-          obs.observe(document.body, {childList:true, subtree:true});
-          renameFirstSidebarItem();
-        })();
-        </script>
         """,
         unsafe_allow_html=True,
     )
@@ -109,15 +91,13 @@ def brand_header(title: str):
     st.markdown(html, unsafe_allow_html=True)
 
 
-def topbar_back(label: str = "← Back", url: Optional[str] = None):
+def topbar_back(label: str = "← Back", url: str | None = None):
     st.markdown('<div class="topbar">', unsafe_allow_html=True)
     if url:
         st.page_link(url, label=label)
     st.markdown("</div>", unsafe_allow_html=True)
 
-# =====================================================================================
-# Core finance helpers
-# =====================================================================================
+# ==================== Core finance helpers ====================
 
 def yf_symbol(t: str) -> str:
     if not isinstance(t, str):
@@ -156,9 +136,7 @@ def zscore_series(s: pd.Series) -> pd.Series:
 def percentile_rank(s: pd.Series) -> pd.Series:
     return s.rank(pct=True) * 100.0
 
-# =====================================================================================
-# Robust yfinance fetchers (chunked + retries)
-# =====================================================================================
+# ==================== Robust fetchers ====================
 
 @st.cache_data(show_spinner=False)
 def fetch_prices_chunked_with_fallback(
@@ -212,7 +190,7 @@ def fetch_prices_chunked_with_fallback(
     ok_set = set(ok)
     missing = [t for t in tickers if t not in ok_set]
 
-    # Singles with retries
+    # Single retries
     if missing:
         for _ in range(retries):
             new_missing = []
@@ -225,9 +203,12 @@ def fetch_prices_chunked_with_fallback(
                     )
                     if "Close" in df:
                         s = df["Close"].dropna()
-                        if s.size: frames.append(s.rename(t)); ok.append(t)
-                        else: new_missing.append(t)
-                    else: new_missing.append(t)
+                        if s.size:
+                            frames.append(s.rename(t)); ok.append(t)
+                        else:
+                            new_missing.append(t)
+                    else:
+                        new_missing.append(t)
                 except Exception:
                     new_missing.append(t)
                 time.sleep(singles_pause + random.uniform(0, 0.25))
@@ -274,9 +255,7 @@ def fetch_fundamentals_simple(tickers: List[str]) -> pd.DataFrame:
         rows.append(row)
     return pd.DataFrame(rows).set_index("ticker")
 
-# =====================================================================================
-# Peer universes
-# =====================================================================================
+# ==================== Peer universes ====================
 
 SP500_FALLBACK = ["AAPL","MSFT","AMZN","NVDA","META","GOOGL","GOOG","TSLA","AVGO","BRK-B","UNH","LLY","V","JPM"]
 DOW30_FALLBACK = ["AAPL","MSFT","JPM","V","JNJ","WMT","PG","UNH","DIS","HD","INTC","IBM","KO","MCD","NKE","TRV","VZ","CSCO"]
@@ -334,9 +313,7 @@ def build_universe(
     peers = sorted(peers_all.difference(set(user)))[:max(1, sample_n)]
     return sorted(set(user) | set(peers))[:350], label
 
-# =====================================================================================
-# Feature builders + interpretations
-# =====================================================================================
+# ==================== Feature builders ====================
 
 def technical_scores(price_panel: Dict[str, pd.Series]) -> pd.DataFrame:
     rows=[]
@@ -416,9 +393,7 @@ def fundamentals_interpretation(zrow: pd.Series) -> List[str]:
         lines.append("**Balance sheet:** typical for the peer set.")
     return lines
 
-# =====================================================================================
-# Reusable stock charts
-# =====================================================================================
+# ==================== Reusable charts ====================
 
 def draw_stock_charts(ticker: str, series: pd.Series):
     if series is None or series.empty:
@@ -448,11 +423,10 @@ def draw_stock_charts(ticker: str, series: pd.Series):
     else:
         st.info("Need > 1 year of data to show the 12-month momentum line.")
 
-# =====================================================================================
-# Portfolio helpers (normalize/sync) + simple editor form
-# =====================================================================================
+# ==================== Portfolio helpers ====================
 
 CURRENCY_MAP = {"$":"USD","€":"EUR","£":"GBP","CHF":"CHF","C$":"CAD","A$":"AUD","¥":"JPY"}
+
 def _safe_num(x): return pd.to_numeric(x, errors="coerce")
 
 def normalize_percents_to_100(p: pd.Series) -> pd.Series:
@@ -502,76 +476,3 @@ def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFra
         w=pd.Series([1.0/n]*n, index=df.index)
     df["weight"]=w
     return df
-
-def holdings_editor_form(currency_symbol: str, total_value: Optional[float]):
-    """Submit-based editable grid (Apply / Normalize) — same UX as your original."""
-    if st.session_state.get("grid_df") is None:
-        st.session_state["grid_df"] = pd.DataFrame({
-            "Ticker": ["AAPL", "MSFT", "NVDA", "AMZN"],
-            "Percent (%)": [25.0, 25.0, 25.0, 25.0],
-            "Amount": [np.nan, np.nan, np.nan, np.nan],
-        })
-
-    st.markdown(
-        f"**Holdings**  \n"
-        f"<span class='small-muted'>Enter <b>Ticker</b> and either <b>Percent (%)</b> or "
-        f"<b>Amount ({currency_symbol})</b>. Values update only when you click "
-        f"<b>Apply changes</b>. Use <b>Normalize</b> to force exactly 100% in percent mode.</span>",
-        unsafe_allow_html=True,
-    )
-
-    committed = st.session_state["grid_df"].copy()
-
-    with st.form("holdings_form", clear_on_submit=False):
-        sync_mode = st.segmented_control(
-            "Sync mode",
-            options=["Percent → Amount", "Amount → Percent"],
-            default="Percent → Amount",
-            help="Choose which side drives on Apply."
-        )
-        mode_key = {"Percent → Amount": "percent", "Amount → Percent": "amount"}[sync_mode]
-
-        edited = st.data_editor(
-            committed,
-            num_rows="dynamic",
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Ticker": st.column_config.TextColumn(width="small"),
-                "Percent (%)": st.column_config.NumberColumn(format="%.2f"),
-                "Amount": st.column_config.NumberColumn(format="%.2f", help=f"Amount in {currency_symbol}"),
-            },
-            key="grid_form",
-        )
-
-        col_a, col_b = st.columns([1, 1])
-        apply_btn = col_a.form_submit_button("Apply changes", type="primary", use_container_width=True)
-        normalize_btn = col_b.form_submit_button("Normalize to 100% (percent mode)", use_container_width=True)
-
-    if normalize_btn:
-        syncd = edited.copy()
-        syncd["Percent (%)"] = normalize_percents_to_100(_safe_num(syncd.get("Percent (%)")))
-        if total_value and total_value>0:
-            syncd["Amount"] = (syncd["Percent (%)"]/100.0*total_value).round(2)
-        st.session_state["grid_df"] = syncd[["Ticker","Percent (%)","Amount"]]
-
-    elif apply_btn:
-        syncd = sync_percent_amount(edited.copy(), total_value or 0.0, mode_key)
-        st.session_state["grid_df"] = syncd[["Ticker","Percent (%)","Amount"]]
-
-    current = st.session_state["grid_df"].copy()
-    view = current.copy()
-    out = current.copy()
-    out["ticker"] = out["Ticker"].map(yf_symbol)
-    out = out[out["ticker"].astype(bool)]
-
-    if total_value and total_value>0 and _safe_num(out["Amount"]).sum()>0:
-        w = _safe_num(out["Amount"]) / _safe_num(out["Amount"]).sum()
-    elif _safe_num(out["Percent (%)"]).sum()>0:
-        w = _safe_num(out["Percent (%)"]) / _safe_num(out["Percent (%)"]).sum()
-    else:
-        n = max(len(out),1)
-        w = pd.Series([1.0/n]*n, index=out.index)
-
-    df_hold = pd.DataFrame({"ticker": out["ticker"], "weight": w})
-    return df_hold, view
