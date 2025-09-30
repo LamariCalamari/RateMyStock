@@ -29,7 +29,23 @@ st.markdown("""
 .banner{background:#0c2f22;color:#cdebdc;border-radius:10px;padding:.9rem 1.1rem;margin:.75rem 0 1.25rem}
 .chart-caption{color:#9aa0a6;margin:-.5rem 0 1rem}
 .topbar{display:flex;justify-content:flex-end;margin:.2rem 0 .6rem}
-.logo{width:70px;height:64px}
+
+/* ensure the SVG doesn’t stretch/shrink oddly */
+.logo{ width:56px; height:52px; flex:0 0 auto; }
+
+/* --- brand row: centers logo + title on one line --- */
+.brand{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:16px;
+  margin: 1.25rem 0 .25rem;
+}
+.brand h1{
+  font-size:56px;
+  margin:0;
+  line-height:1;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -291,12 +307,13 @@ def macro_from_vix(vix_series: pd.Series):
 
 # -------------------- LANDING (fixed) --------------------
 def landing():
-    # Row 1: centered logo + title using Streamlit columns (no raw HTML)
-    left, mid_logo, mid_title, right = st.columns([1,1,3,1])
-    with mid_logo:
-        st.markdown(inline_logo_svg(), unsafe_allow_html=True)
-    with mid_title:
-        st.markdown("<h1 style='font-size:56px;margin:0'>Rate My</h1>", unsafe_allow_html=True)
+    # Centered brand row: logo + title side-by-side
+    st.markdown(f"""
+    <div class="brand">
+      {inline_logo_svg()}
+      <h1>Rate My</h1>
+    </div>
+    """, unsafe_allow_html=True)
 
     # Row 2: tagline centered
     st.markdown(
@@ -395,10 +412,14 @@ def draw_stock_charts(t: str, series: pd.Series):
 # -------------------- STOCK APP --------------------
 def app_stock():
     topbar_back("back_stock")
-    c1, c2, c3 = st.columns([1,1,1])
-    with c2:
-        st.markdown(inline_logo_svg(), unsafe_allow_html=True)
-        st.markdown("<h1 style='text-align:center;margin:0;'>Rate My Stock</h1>", unsafe_allow_html=True)
+
+    # Header: logo + title next to each other, centered
+    st.markdown(f"""
+    <div class="brand">
+      {inline_logo_svg()}
+      <h1>Rate My Stock</h1>
+    </div>
+    """, unsafe_allow_html=True)
 
     c_in_left, c_in_mid, c_in_right = st.columns([1,2,1])
     with c_in_mid:
@@ -758,10 +779,14 @@ def holdings_editor_form(currency_symbol, total_value):
 
 def app_portfolio():
     topbar_back("back_port")
-    c1, c2, c3 = st.columns([1,1,1])
-    with c2:
-        st.markdown(inline_logo_svg(), unsafe_allow_html=True)
-        st.markdown("<h1 style='text-align:center;margin:0;'>Rate My Portfolio</h1>", unsafe_allow_html=True)
+
+    # Header: logo + title next to each other, centered
+    st.markdown(f"""
+    <div class="brand">
+      {inline_logo_svg()}
+      <h1>Rate My Portfolio</h1>
+    </div>
+    """, unsafe_allow_html=True)
 
     t1,t2,t3=st.columns([1,1,1])
     with t1: cur = st.selectbox("Currency", list(CURRENCY_MAP.keys()), index=0)
