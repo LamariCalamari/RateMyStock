@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
-import streamlit.components.v1 as components
 
 # ==================== Global CSS & Brand ====================
 
@@ -17,21 +16,26 @@ def inject_css():
         <style>
         .block-container{max-width:1140px;}
 
-        /* Hide the tiny 'app' pill above the page list in the sidebar */
-        [data-testid="stSidebarNav"] > div:first-child { display:none !important; }
+        /* Sidebar: replace the small 'app' pill text with 'Home' */
+        section[data-testid="stSidebar"] [data-testid="stSidebarNav"] > div:first-child{
+          position:relative;
+          color:transparent !important;         /* hide original text */
+        }
+        section[data-testid="stSidebar"] [data-testid="stSidebarNav"] > div:first-child::after{
+          content:"Home";
+          position:absolute; inset:auto auto auto 14px;
+          top:8px; color:#e7ebf0; font-weight:700; letter-spacing:.2px;
+        }
 
         /* Brand header: logo next to title, centered */
-        .brand{
-          display:flex;align-items:center;justify-content:center;gap:16px;
-          margin:1.25rem 0 .25rem;
-        }
-        .brand h1{
-          font-size:56px;margin:0;line-height:1;
+        .brand{ display:flex; align-items:center; justify-content:center; gap:16px; margin:1.1rem 0 .35rem; }
+        .brand .wordmark{
+          font-size:56px; line-height:1; font-weight:900; margin:0;
           background:linear-gradient(90deg,#e74c3c 0%, #f39c12 50%, #2ecc71 100%);
-          -webkit-background-clip:text;background-clip:text;color:transparent;
+          -webkit-background-clip:text; background-clip:text; color:transparent;
           letter-spacing:.3px;
         }
-        .logo{width:56px;height:52px;flex:0 0 auto;}
+        .logo{ width:56px; height:52px; flex:0 0 auto; }
 
         /* KPI + misc (from your original) */
         .kpi-card{padding:1rem 1.1rem;border-radius:12px;background:#111418;border:1px solid #222}
@@ -41,31 +45,23 @@ def inject_css():
         .chart-caption{color:#9aa0a6;margin:-.5rem 0 1rem}
         .topbar{display:flex;justify-content:flex-end;margin:.2rem 0 .6rem}
 
-        /* CTA row — center & keep items on one line */
-        .cta-row{
-          display:flex;gap:16px;justify-content:center;align-items:center;flex-wrap:wrap;margin:4px 0 18px;
-        }
-        /* Turn st.page_link anchors into card-like buttons */
-        #ctas a[data-testid="stPageLink"]{
-          display:inline-flex;align-items:center;gap:.55rem;
-          padding:14px 18px;border-radius:14px;text-decoration:none;font-weight:800;
-          border:1px solid #2e3238;background:#15181d;color:#e9edf0;
+        /* CTA Boxes */
+        .cta-box{
+          display:block; text-align:center; padding:16px 18px; border-radius:14px;
+          background:#15181d; border:1px solid #2e3238;
           box-shadow:0 1px 0 rgba(255,255,255,.06) inset, 0 8px 24px rgba(0,0,0,.35);
-          transition:transform .08s ease, box-shadow .16s ease, border-color .12s ease, background .12s ease;
         }
-        #ctas a[data-testid="stPageLink"]:hover{
-          transform:translateY(-1px);
-          box-shadow:0 1px 0 rgba(255,255,255,.08) inset, 0 12px 28px rgba(0,0,0,.45);
-          border-color:#3b4148;background:#1a1f26;
+        .cta-box:hover{ background:#181c22; border-color:#3a4048; }
+        .cta-box a[data-testid="stPageLink"]{
+          display:inline-flex; align-items:center; gap:.6rem; font-weight:800; color:#e9edf0; text-decoration:none;
         }
-        /* Make the first CTA “primary” with the brand gradient */
-        #ctas a[data-testid="stPageLink"]:first-child{
-          background:linear-gradient(90deg,#e85d58 0%,#f39c12 50%,#2ecc71 100%);
-          color:#111;border:1px solid #ffb48a;
+        /* Make first CTA stand out with the brand gradient frame */
+        .cta-box.primary{
+          background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(0,0,0,.06)) padding-box,
+                     linear-gradient(90deg,#e85d58, #f39c12, #2ecc71) border-box;
+          border:1px solid transparent;
         }
-        #ctas a[data-testid="stPageLink"]:first-child:hover{
-          filter:saturate(1.05) brightness(1.05);
-        }
+
         </style>
         """,
         unsafe_allow_html=True,
@@ -86,9 +82,10 @@ def inline_logo_svg() -> str:
 
 
 def brand_header(title: str):
-    """Render the brand header with components.html to avoid any Markdown escaping."""
-    html = f"""<div class="brand">{inline_logo_svg()}<h1>{title}</h1></div>"""
-    components.html(html, height=80, scrolling=False)
+    """Centered logo + gradient wordmark — no Markdown escaping issues."""
+    # No leading spaces before the <div> to avoid Markdown treating it as code.
+    html = f"""<div class="brand">{inline_logo_svg()}<div class="wordmark">{title}</div></div>"""
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def topbar_back(label: str = "← Back", url: str | None = None):
@@ -97,8 +94,7 @@ def topbar_back(label: str = "← Back", url: str | None = None):
         st.page_link(url, label=label)
     st.markdown("</div>", unsafe_allow_html=True)
 
-
-# ==================== Finance Helpers (unchanged core logic) ====================
+# ==================== Finance Helpers (original logic retained) ====================
 
 def yf_symbol(t: str) -> str:
     if not isinstance(t, str):
@@ -137,7 +133,6 @@ def zscore_series(s: pd.Series) -> pd.Series:
 def percentile_rank(s: pd.Series) -> pd.Series:
     return s.rank(pct=True) * 100.0
 
-
 # ==================== Fetchers (chunked + retries) ====================
 
 @st.cache_data(show_spinner=False)
@@ -165,22 +160,15 @@ def fetch_prices_chunked_with_fallback(
             if t in got:
                 s = df[t]["Close"].dropna()
                 if s.size:
-                    frames.append(s.rename(t))
-                    ok.append(t)
+                    frames.append(s.rename(t)); ok.append(t)
 
-    # Bulk pass
+    # Bulk
     for i in range(0, len(tickers), chunk):
-        group = tickers[i : i + chunk]
+        group = tickers[i:i+chunk]
         try:
-            df = yf.download(
-                group,
-                period=period,
-                interval=interval,
-                auto_adjust=True,
-                group_by="ticker",
-                threads=False,
-                progress=False,
-            )
+            df = yf.download(group, period=period, interval=interval,
+                             auto_adjust=True, group_by="ticker",
+                             threads=False, progress=False)
             if isinstance(df.columns, pd.MultiIndex):
                 _append_from_multi(df, group)
             else:
@@ -188,8 +176,7 @@ def fetch_prices_chunked_with_fallback(
                 if "Close" in df:
                     s = df["Close"].dropna()
                     if s.size:
-                        frames.append(s.rename(t))
-                        ok.append(t)
+                        frames.append(s.rename(t)); ok.append(t)
         except Exception:
             pass
         time.sleep(sleep_between + random.uniform(0, 0.15))
@@ -197,36 +184,26 @@ def fetch_prices_chunked_with_fallback(
     ok_set = set(ok)
     missing = [t for t in tickers if t not in ok_set]
 
-    # Single retries
+    # Singles
     if missing:
         for _ in range(retries):
             new_missing = []
             for t in missing:
                 try:
-                    df = yf.download(
-                        t,
-                        period=period,
-                        interval=interval,
-                        auto_adjust=True,
-                        group_by="ticker",
-                        threads=False,
-                        progress=False,
-                    )
+                    df = yf.download(t, period=period, interval=interval,
+                                     auto_adjust=True, group_by="ticker",
+                                     threads=False, progress=False)
                     if "Close" in df:
                         s = df["Close"].dropna()
-                        if s.size:
-                            frames.append(s.rename(t))
-                            ok.append(t)
-                        else:
-                            new_missing.append(t)
+                        if s.size: frames.append(s.rename(t)); ok.append(t)
+                        else: new_missing.append(t)
                     else:
                         new_missing.append(t)
                 except Exception:
                     new_missing.append(t)
                 time.sleep(singles_pause + random.uniform(0, 0.25))
             missing = new_missing
-            if not missing:
-                break
+            if not missing: break
 
     prices = pd.concat(frames, axis=1).sort_index() if frames else pd.DataFrame()
     if not prices.empty:
@@ -247,29 +224,24 @@ def fetch_vix_series(period: str = "6mo", interval: str = "1d") -> pd.Series:
 
 @st.cache_data(show_spinner=False)
 def fetch_fundamentals_simple(tickers: List[str]) -> pd.DataFrame:
-    keep = [
-        "revenueGrowth","earningsGrowth","returnOnEquity",
-        "profitMargins","grossMargins","operatingMargins","ebitdaMargins",
-        "trailingPE","forwardPE","debtToEquity",
-    ]
-    rows = []
+    keep = ["revenueGrowth","earningsGrowth","returnOnEquity",
+            "profitMargins","grossMargins","operatingMargins","ebitdaMargins",
+            "trailingPE","forwardPE","debtToEquity"]
+    rows=[]
     for raw in tickers:
-        t = yf_symbol(raw)
+        t=yf_symbol(raw)
         try:
             info = yf.Ticker(t).info or {}
         except Exception:
-            info = {}
-        row = {"ticker": t}
+            info={}
+        row={"ticker":t}
         for k in keep:
-            try:
-                row[k] = float(info.get(k, np.nan))
-            except Exception:
-                row[k] = np.nan
+            try: row[k]=float(info.get(k, np.nan))
+            except Exception: row[k]=np.nan
         rows.append(row)
     return pd.DataFrame(rows).set_index("ticker")
 
-
-# ==================== Peer Universes ====================
+# ==================== Peer Universes & Feature Builders (unchanged) ====================
 
 SP500_FALLBACK = ["AAPL","MSFT","AMZN","NVDA","META","GOOGL","GOOG","TSLA","AVGO","BRK-B","UNH","LLY","V","JPM"]
 DOW30_FALLBACK = ["AAPL","MSFT","JPM","V","JNJ","WMT","PG","UNH","DIS","HD","INTC","IBM","KO","MCD","NKE","TRV","VZ","CSCO"]
@@ -279,16 +251,14 @@ def list_sp500() -> set:
     try:
         got = {yf_symbol(t) for t in yf.tickers_sp500()}
         if got: return got
-    except Exception:
-        pass
+    except Exception: pass
     return set(SP500_FALLBACK)
 
 def list_dow30() -> set:
     try:
         got = {yf_symbol(t) for t in yf.tickers_dow()}
         if got: return got
-    except Exception:
-        pass
+    except Exception: pass
     return set(DOW30_FALLBACK)
 
 def list_nasdaq100() -> set:
@@ -296,13 +266,10 @@ def list_nasdaq100() -> set:
         if hasattr(yf,"tickers_nasdaq"):
             got = {yf_symbol(t) for t in yf.tickers_nasdaq()}
             if got: return got
-    except Exception:
-        pass
+    except Exception: pass
     return set(NASDAQ100_FALLBACK)
 
-def build_universe(
-    user_tickers: List[str], mode: str, sample_n: int = 150, custom_raw: str = ""
-) -> Tuple[List[str], str]:
+def build_universe(user_tickers: List[str], mode: str, sample_n: int = 150, custom_raw: str = "") -> Tuple[List[str], str]:
     user = [yf_symbol(t) for t in user_tickers]
     if mode == "S&P 500":
         peers_all = list_sp500(); label="S&P 500"
@@ -330,9 +297,6 @@ def build_universe(
     peers = sorted(peers_all.difference(set(user)))[:max(1, sample_n)]
     return sorted(set(user)|set(peers))[:350], label
 
-
-# ==================== Feature Builders ====================
-
 def technical_scores(price_panel: Dict[str, pd.Series]) -> pd.DataFrame:
     rows=[]
     for ticker, px in price_panel.items():
@@ -347,10 +311,8 @@ def technical_scores(price_panel: Dict[str, pd.Series]) -> pd.DataFrame:
         rsi_strength = (r-50.0)/50.0 if pd.notna(r) else np.nan
         mom = np.nan
         if len(px) > 252:
-            try:
-                mom = px.iloc[-1]/px.iloc[-253]-1.0
-            except Exception:
-                mom = np.nan
+            try: mom = px.iloc[-1]/px.iloc[-253]-1.0
+            except Exception: mom = np.nan
         rows.append({"ticker":ticker,"dma_gap":dma_gap,"macd_hist":macd_hist,
                      "rsi_strength":rsi_strength,"mom12m":mom})
     return pd.DataFrame(rows).set_index("ticker") if rows else pd.DataFrame()
@@ -371,9 +333,6 @@ def macro_from_vix(vix_series: pd.Series) -> Tuple[float,float,float,float]:
         trend = float(np.clip(trend,0,1))
     macro=float(np.clip(0.70*level+0.30*trend,0,1))
     return macro, vix_last, ema20, rel_gap
-
-
-# ==================== Interpretations ====================
 
 def fundamentals_interpretation(zrow: pd.Series) -> List[str]:
     lines=[]
@@ -403,14 +362,12 @@ def fundamentals_interpretation(zrow: pd.Series) -> List[str]:
         lines.append("**Profitability:** below peer medians — monitor margin trajectory.")
     else:
         lines.append("**Profitability:** roughly peer-like.")
-
     if val.startswith("bullish"):
         lines.append("**Valuation tilt:** cheaper than peers (potential multiple support).")
     elif val.startswith("watch"):
         lines.append("**Valuation tilt:** richer than peers — execution must stay strong.")
     else:
         lines.append("**Valuation tilt:** roughly fair vs peers.")
-
     if lev.startswith("bullish"):
         lines.append("**Balance sheet:** lower leverage vs peers (lower financial risk).")
     elif lev.startswith("watch"):
