@@ -1,4 +1,4 @@
-# app_utils.py
+# app_utils.py — shared styles + all helpers
 import time
 import random
 from typing import Dict, List, Tuple
@@ -8,6 +8,7 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
+
 # ==================== Global CSS & Brand ====================
 
 def inject_css():
@@ -16,27 +17,25 @@ def inject_css():
         <style>
         .block-container{max-width:1140px;}
 
-        /* Hide native 'app' pill and show our own */
-        [data-testid="stSidebarNav"] > div:first-child{ display:none !important; }
-        .pill{
-          display:inline-block; padding:8px 14px; border-radius:10px;
-          background:#2d3037; color:#e9edf0; font-weight:700; margin:6px 0 2px;
-          border:1px solid #3a3f46;
+        /* ===== Sidebar: change first nav label 'app' -> 'Home' =====
+           Streamlit renders sidebar nav as a UL; the first LI is the current page (app.py).
+           We hide its text and draw Home over it. */
+        [data-testid="stSidebarNav"] ul li:first-child a p{
+          color:transparent !important; position:relative;
         }
-        .pill-home{
-          background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(0,0,0,.06)) padding-box,
-                     linear-gradient(90deg,#e85d58, #f39c12, #2ecc71) border-box;
-          border:1px solid transparent; color:#f4f6f8;
+        [data-testid="stSidebarNav"] ul li:first-child a p::after{
+          content:"Home"; position:absolute; left:0; top:0;
+          color:#e9edf0; font-weight:700; letter-spacing:.2px;
         }
 
-        /* Brand header */
+        /* ===== Brand header (logo + gradient wordmark) ===== */
         .brand{
-          display:flex;align-items:center;justify-content:center;gap:16px;
+          display:flex; align-items:center; justify-content:center; gap:16px;
           margin:1.0rem 0 .25rem;
         }
-        .logo{width:56px;height:52px;flex:0 0 auto;}
+        .logo{ width:56px; height:52px; flex:0 0 auto; }
 
-        /* KPI + misc (original styles) */
+        /* ===== KPI + misc (from your app) ===== */
         .kpi-card{padding:1rem 1.1rem;border-radius:12px;background:#111418;border:1px solid #222}
         .kpi-num{font-size:2.2rem;font-weight:800;margin-top:.25rem}
         .small-muted{color:#9aa0a6;font-size:.9rem}
@@ -44,23 +43,25 @@ def inject_css():
         .chart-caption{color:#9aa0a6;margin:-.5rem 0 1rem}
         .topbar{display:flex;justify-content:flex-end;margin:.2rem 0 .6rem}
 
-        /* CTA Boxes (used on Home) */
-        .cta-box{
-          display:block; text-align:center; padding:16px 18px; border-radius:14px;
-          background:#15181d; border:1px solid #2e3238; min-width:240px;
-          box-shadow:0 1px 0 rgba(255,255,255,.06) inset, 0 8px 24px rgba(0,0,0,.35);
-          transition:transform .08s ease, box-shadow .16s ease, border-color .12s ease, background .12s ease;
+        /* ===== Home page CTAs (style the page links directly) =====
+           We only target links in MAIN area so sidebar links remain native. */
+        [data-testid="stMain"] a[data-testid="stPageLink"]{
+          display:inline-flex; align-items:center; gap:.6rem;
+          padding:16px 22px; border-radius:14px; text-decoration:none; font-weight:800;
+          background:linear-gradient(90deg,#e85d58, #f39c12, #2ecc71) padding-box,
+                     linear-gradient(90deg,rgba(255,255,255,.12),rgba(255,255,255,.02)) border-box;
+          border:1px solid transparent; color:#0d0f12;
+          box-shadow:0 1px 0 rgba(255,255,255,.06) inset, 0 10px 28px rgba(0,0,0,.40);
+          white-space:nowrap; min-width:260px; justify-content:center;
+          transition:transform .08s ease, box-shadow .16s ease, filter .12s ease;
         }
-        .cta-box:hover{ background:#181c22; border-color:#3a4048; transform:translateY(-1px); }
-        .cta-box a[data-testid="stPageLink"]{
-          display:inline-flex; align-items:center; gap:.6rem; font-weight:800; color:#e9edf0; text-decoration:none;
-          white-space:nowrap;
+        [data-testid="stMain"] a[data-testid="stPageLink"]:hover{
+          transform:translateY(-1px);
+          filter:saturate(1.05) brightness(1.05);
+          box-shadow:0 1px 0 rgba(255,255,255,.08) inset, 0 14px 34px rgba(0,0,0,.48);
         }
-        .cta-box.primary{
-          background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(0,0,0,.06)) padding-box,
-                     linear-gradient(90deg,#e85d58, #f39c12, #2ecc71) border-box;
-          border:1px solid transparent;
-        }
+        /* Don’t affect topbar back link */
+        .topbar a[data-testid="stPageLink"]{ all:unset !important; cursor:pointer; color:inherit; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -96,6 +97,7 @@ def topbar_back(label: str = "← Back", url: str | None = None):
     if url:
         st.page_link(url, label=label)
     st.markdown("</div>", unsafe_allow_html=True)
+
 
 # ==================== Core finance helpers ====================
 
@@ -136,7 +138,8 @@ def zscore_series(s: pd.Series) -> pd.Series:
 def percentile_rank(s: pd.Series) -> pd.Series:
     return s.rank(pct=True) * 100.0
 
-# ==================== Robust fetchers ====================
+
+# ==================== Fetchers (chunked + retries) ====================
 
 @st.cache_data(show_spinner=False)
 def fetch_prices_chunked_with_fallback(
@@ -166,9 +169,9 @@ def fetch_prices_chunked_with_fallback(
                     frames.append(s.rename(t))
                     ok.append(t)
 
-    # Bulk pass
+    # Bulk
     for i in range(0, len(tickers), chunk):
-        group = tickers[i : i + chunk]
+        group = tickers[i:i+chunk]
         try:
             df = yf.download(
                 group, period=period, interval=interval,
@@ -190,7 +193,7 @@ def fetch_prices_chunked_with_fallback(
     ok_set = set(ok)
     missing = [t for t in tickers if t not in ok_set]
 
-    # Single retries
+    # Singles
     if missing:
         for _ in range(retries):
             new_missing = []
@@ -255,6 +258,7 @@ def fetch_fundamentals_simple(tickers: List[str]) -> pd.DataFrame:
         rows.append(row)
     return pd.DataFrame(rows).set_index("ticker")
 
+
 # ==================== Peer universes ====================
 
 SP500_FALLBACK = ["AAPL","MSFT","AMZN","NVDA","META","GOOGL","GOOG","TSLA","AVGO","BRK-B","UNH","LLY","V","JPM"]
@@ -313,7 +317,8 @@ def build_universe(
     peers = sorted(peers_all.difference(set(user)))[:max(1, sample_n)]
     return sorted(set(user) | set(peers))[:350], label
 
-# ==================== Feature builders ====================
+
+# ==================== Feature builders & interpretations ====================
 
 def technical_scores(price_panel: Dict[str, pd.Series]) -> pd.DataFrame:
     rows=[]
@@ -392,87 +397,3 @@ def fundamentals_interpretation(zrow: pd.Series) -> List[str]:
     else:
         lines.append("**Balance sheet:** typical for the peer set.")
     return lines
-
-# ==================== Reusable charts ====================
-
-def draw_stock_charts(ticker: str, series: pd.Series):
-    if series is None or series.empty:
-        st.info("Not enough history to show charts.")
-        return
-    st.subheader("📈 Price & EMAs")
-    e20, e50 = ema(series, 20), ema(series, 50)
-    price_df = pd.DataFrame({"Close": series, "EMA20": e20, "EMA50": e50})
-    st.line_chart(price_df, use_container_width=True)
-    st.caption("If price is **above EMA50/EMA20**, trend bias is positive; **below** suggests a headwind.")
-
-    st.subheader("📉 MACD")
-    line, sig, hist = macd(series)
-    st.line_chart(pd.DataFrame({"MACD line": line, "Signal": sig}), use_container_width=True)
-    st.bar_chart(pd.DataFrame({"Histogram": hist}), use_container_width=True)
-    st.caption("Rising histogram above zero → momentum building; falling below zero → fading.")
-
-    st.subheader("🔁 RSI (14)")
-    st.line_chart(pd.DataFrame({"RSI(14)": rsi(series)}), use_container_width=True)
-    st.caption(">70 = overbought • <30 = oversold • around 50 = neutral trend strength.")
-
-    st.subheader("🚀 12-month momentum")
-    if len(series) > 252:
-        mom12 = series/series.shift(253)-1.0
-        st.line_chart(pd.DataFrame({"12m momentum": mom12}), use_container_width=True)
-        st.caption("Positive vs one year ago → outperformance; negative → underperformance.")
-    else:
-        st.info("Need > 1 year of data to show the 12-month momentum line.")
-
-# ==================== Portfolio helpers ====================
-
-CURRENCY_MAP = {"$":"USD","€":"EUR","£":"GBP","CHF":"CHF","C$":"CAD","A$":"AUD","¥":"JPY"}
-
-def _safe_num(x): return pd.to_numeric(x, errors="coerce")
-
-def normalize_percents_to_100(p: pd.Series) -> pd.Series:
-    p = _safe_num(p).fillna(0.0)
-    s = p.sum()
-    if s <= 0: return p
-    return (p / s) * 100.0
-
-def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFrame:
-    df=df.copy()
-    df["Ticker"]=df["Ticker"].astype(str).str.strip()
-    df=df[df["Ticker"].astype(bool)].reset_index(drop=True)
-    n=len(df)
-    if n==0:
-        df["weight"]=[]
-        return df
-
-    df["Percent (%)"]=_safe_num(df.get("Percent (%)"))
-    df["Amount"]=_safe_num(df.get("Amount"))
-    has_total = (total is not None and total>0)
-
-    if has_total:
-        if mode=="percent":
-            if df["Percent (%)"].fillna(0).sum()==0:
-                df["Percent (%)"]=100.0/n
-            df["Percent (%)"] = normalize_percents_to_100(df["Percent (%)"]).round(2)
-            df["Amount"]=(df["Percent (%)"]/100.0*total).round(2)
-        else:
-            s=df["Amount"].fillna(0).sum()
-            if s>0:
-                df["Percent (%)"]= (df["Amount"]/total*100.0).round(2)
-                df["Percent (%)"]= normalize_percents_to_100(df["Percent (%)"]).round(2)
-                df["Amount"]= (df["Percent (%)"]/100.0*total).round(2)
-            else:
-                df["Percent (%)"]=100.0/n
-                df["Amount"]= (df["Percent (%)"]/100.0*total).round(2)
-    else:
-        if df["Percent (%)"].fillna(0).sum()==0:
-            df["Percent (%)"]=100.0/n
-        df["Percent (%)"]= normalize_percents_to_100(df["Percent (%)"]).round(2)
-
-    if has_total and df["Amount"].fillna(0).sum()>0:
-        w=df["Amount"].fillna(0)/df["Amount"].fillna(0).sum()
-    elif df["Percent (%)"].fillna(0).sum()>0:
-        w=df["Percent (%)"].fillna(0)/df["Percent (%)"].fillna(0).sum()
-    else:
-        w=pd.Series([1.0/n]*n, index=df.index)
-    df["weight"]=w
-    return df
