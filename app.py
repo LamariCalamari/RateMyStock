@@ -7,8 +7,9 @@ st.set_page_config(page_title="Home — Rate My", layout="wide")
 inject_css()
 ensure_db()
 
-# Sidebar auth status
+# Sidebar
 with st.sidebar:
+    st.header("Home")
     user = get_current_user_from_state()
     if user:
         st.success(f"Signed in as {user['email']}")
@@ -16,9 +17,9 @@ with st.sidebar:
             logout()
             st.rerun()
     else:
-        st.info("Sign up / Log in lives in the **Portfolio Tracker** page sidebar.")
+        st.info("Sign up / Log in is in the **Portfolio Tracker** page sidebar.")
 
-# Brand + tagline
+# Brand + tagline (HTML, not code)
 brand_header("Rate My")
 st.markdown(
     "<div style='text-align:center;color:#9aa0a6;font-size:1.05rem;margin-top:.2rem;'>"
@@ -27,12 +28,12 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Pretty CTA links (styled via CSS) and grouped under a 'Home' section in the Streamlit sidebar tree
+# Pretty CTA buttons (no unsupported 'section' kwarg)
 st.markdown('<div class="home-links">', unsafe_allow_html=True)
-st.page_link("pages/1_Rate_My_Stock.py", label="📈 Rate My Stock", section="Home")
-st.page_link("pages/2_Rate_My_Portfolio.py", label="💼 Rate My Portfolio", section="Home")
-st.page_link("pages/3_Portfolio_Tracker.py", label="📊 Portfolio Tracker", section="Home")
-st.markdown('</div>', unsafe_allow_html=True)
+st.page_link("pages/1_Rate_My_Stock.py", label="📈 Rate My Stock")
+st.page_link("pages/2_Rate_My_Portfolio.py", label="💼 Rate My Portfolio")
+st.page_link("pages/3_Portfolio_Tracker.py", label="📊 Portfolio Tracker")
+st.markdown("</div>", unsafe_allow_html=True)
 
 st.divider()
 st.caption("Your portfolios are saved to a local SQLite DB when signed in.")
