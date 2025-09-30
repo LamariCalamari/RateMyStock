@@ -1,17 +1,16 @@
-# app.py — Home / landing (keep this filename)
+# app.py — Home / landing
 import streamlit as st
-from app_utils import inject_css, brand_header
+from app_utils import inject_css_and_script, brand_header
 
 st.set_page_config(page_title="Home — Rate My", layout="wide")
-inject_css()
+inject_css_and_script()  # CSS + MutationObserver ("app" -> "Home")
 
-# ---------- Sidebar ----------
+# ----- Sidebar -----
 with st.sidebar:
-    # The CSS in inject_css() renames the first nav item to "Home"
     st.header("Home")
     st.info("Sign up / Log in is in the **Portfolio Tracker** page sidebar.")
 
-# ---------- Hero ----------
+# ----- Hero -----
 brand_header("Rate My")
 st.markdown(
     "<p style='text-align:center;color:#a8b0b8;font-size:1.06rem;margin:.35rem 0 1.2rem'>"
@@ -20,9 +19,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ---------- CTAs (boxed gradient buttons, single row) ----------
+# ----- Three boxed CTAs in one centered row -----
 left, c1, c2, c3, right = st.columns([1, 1.15, 1.15, 1.15, 1], gap="large")
-
 with c1:
     st.page_link("pages/1_Rate_My_Stock.py", label="📈 Rate My Stock")
 with c2:
