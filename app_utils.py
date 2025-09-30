@@ -21,10 +21,14 @@ def inject_css():
           display:flex;align-items:center;justify-content:center;gap:16px;
           margin:1.25rem 0 .25rem;
         }
-        .brand h1{font-size:56px;margin:0;line-height:1;}
+        .brand h1{
+          font-size:56px;margin:0;line-height:1;
+          background:linear-gradient(90deg,#e74c3c 0%, #f39c12 50%, #2ecc71 100%);
+          -webkit-background-clip:text;background-clip:text;color:transparent;
+        }
         .logo{width:56px;height:52px;flex:0 0 auto;}
 
-        /* KPI + misc (from original) */
+        /* KPI + misc */
         .kpi-card{padding:1rem 1.1rem;border-radius:12px;background:#111418;border:1px solid #222}
         .kpi-num{font-size:2.2rem;font-weight:800;margin-top:.25rem}
         .small-muted{color:#9aa0a6;font-size:.9rem}
@@ -32,27 +36,11 @@ def inject_css():
         .chart-caption{color:#9aa0a6;margin:-.5rem 0 1rem}
         .topbar{display:flex;justify-content:flex-end;margin:.2rem 0 .6rem}
 
-        /* Home page CTA buttons (styled st.page_link) */
-        .home-links{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin-top:12px}
-        .home-links a[data-testid="stPageLink"]{
-          display:inline-flex;align-items:center;gap:.6rem;
-          padding:14px 18px;border-radius:12px;text-decoration:none;
-          font-weight:700;border:1px solid #30343a; background:#171a1f; color:#e6e8eb;
-          box-shadow:0 1px 0 rgba(255,255,255,.06) inset, 0 4px 16px rgba(0,0,0,.35);
-          transition:transform .06s ease, box-shadow .12s ease, border-color .12s ease, background .12s ease;
-        }
-        .home-links a[data-testid="stPageLink"]:hover{
-          transform:translateY(-1px);
-          box-shadow:0 1px 0 rgba(255,255,255,.08) inset, 0 8px 24px rgba(0,0,0,.45);
-          border-color:#3a3f46;
-          background:#1b1f26;
-        }
-        /* Make first CTA look “primary” */
-        .home-links a[data-testid="stPageLink"]:first-child{
-          background:#e85d58;color:white;border-color:#ea6a65;
-        }
-        .home-links a[data-testid="stPageLink"]:first-child:hover{
-          background:#f06964;border-color:#ff7b75;
+        /* Optional: colorize page links text with the same gradient vibe */
+        a[data-testid="stPageLink"] span{
+          background:linear-gradient(90deg,#e74c3c 0%, #f39c12 50%, #2ecc71 100%);
+          -webkit-background-clip:text;background-clip:text;color:transparent;
+          font-weight:700;
         }
         </style>
         """,
@@ -61,8 +49,7 @@ def inject_css():
 
 
 def inline_logo_svg() -> str:
-    return """
-<svg class="logo" viewBox="0 0 100 90" xmlns="http://www.w3.org/2000/svg" aria-label="Rate My">
+    return """<svg class="logo" viewBox="0 0 100 90" xmlns="http://www.w3.org/2000/svg" aria-label="Rate My">
   <defs>
     <linearGradient id="g" x1="0" x2="0" y1="1" y2="0">
       <stop offset="0%"  stop-color="#e74c3c"/>
@@ -71,21 +58,15 @@ def inline_logo_svg() -> str:
     </linearGradient>
   </defs>
   <polygon points="50,5 95,85 5,85" fill="url(#g)"/>
-</svg>
-"""
+</svg>"""
 
 
 def brand_header(title: str):
-    """Centered logo + H1 title in a single flex row."""
-    st.markdown(
-        f"""
-        <div class="brand">
-          {inline_logo_svg()}
-          <h1>{title}</h1>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    """Centered logo + H1 title in a single flex row.
+    IMPORTANT: no leading whitespace before the <div> to avoid Markdown code blocks.
+    """
+    html = f"""<div class="brand">{inline_logo_svg()}<h1>{title}</h1></div>"""
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def topbar_back(label: str = "← Back", url: str | None = None):
@@ -93,7 +74,6 @@ def topbar_back(label: str = "← Back", url: str | None = None):
     if url:
         st.page_link(url, label=label)
     st.markdown("</div>", unsafe_allow_html=True)
-
 
 # ==================== Finance Helpers ====================
 
@@ -165,7 +145,7 @@ def fetch_prices_chunked_with_fallback(
                     frames.append(s.rename(t))
                     ok.append(t)
 
-    # bulk pass
+    # Bulk pass
     for i in range(0, len(tickers), chunk):
         group = tickers[i : i + chunk]
         try:
@@ -194,7 +174,7 @@ def fetch_prices_chunked_with_fallback(
     ok_set = set(ok)
     missing = [t for t in tickers if t not in ok_set]
 
-    # single retries
+    # Single retries
     if missing:
         for _ in range(retries):
             new_missing = []
@@ -275,60 +255,9 @@ def fetch_fundamentals_simple(tickers: List[str]) -> pd.DataFrame:
 
 # ==================== Peer Universes ====================
 
-SP500_FALLBACK = [
-    "AAPL",
-    "MSFT",
-    "AMZN",
-    "NVDA",
-    "META",
-    "GOOGL",
-    "GOOG",
-    "TSLA",
-    "AVGO",
-    "BRK-B",
-    "UNH",
-    "LLY",
-    "V",
-    "JPM",
-]
-DOW30_FALLBACK = [
-    "AAPL",
-    "MSFT",
-    "JPM",
-    "V",
-    "JNJ",
-    "WMT",
-    "PG",
-    "UNH",
-    "DIS",
-    "HD",
-    "INTC",
-    "IBM",
-    "KO",
-    "MCD",
-    "NKE",
-    "TRV",
-    "VZ",
-    "CSCO",
-]
-NASDAQ100_FALLBACK = [
-    "AAPL",
-    "MSFT",
-    "NVDA",
-    "AMZN",
-    "META",
-    "GOOGL",
-    "GOOG",
-    "AVGO",
-    "TSLA",
-    "COST",
-    "PEP",
-    "ADBE",
-    "NFLX",
-    "CSCO",
-    "AMD",
-]
-
+SP500_FALLBACK = ["AAPL","MSFT","AMZN","NVDA","META","GOOGL","GOOG","TSLA","AVGO","BRK-B","UNH","LLY","V","JPM"]
+DOW30_FALLBACK = ["AAPL","MSFT","JPM","V","JNJ","WMT","PG","UNH","DIS","HD","INTC","IBM","KO","MCD","NKE","TRV","VZ","CSCO"]
+NASDAQ100_FALLBACK = ["AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","AVGO","TSLA","COST","PEP","ADBE","NFLX","CSCO","AMD"]
 
 def list_sp500() -> set:
     try:
@@ -339,7 +268,6 @@ def list_sp500() -> set:
         pass
     return set(SP500_FALLBACK)
 
-
 def list_dow30() -> set:
     try:
         got = {yf_symbol(t) for t in yf.tickers_dow()}
@@ -348,7 +276,6 @@ def list_dow30() -> set:
     except Exception:
         pass
     return set(DOW30_FALLBACK)
-
 
 def list_nasdaq100() -> set:
     try:
@@ -360,144 +287,106 @@ def list_nasdaq100() -> set:
         pass
     return set(NASDAQ100_FALLBACK)
 
-
 def build_universe(
     user_tickers: List[str], mode: str, sample_n: int = 150, custom_raw: str = ""
 ) -> Tuple[List[str], str]:
     user = [yf_symbol(t) for t in user_tickers]
     if mode == "S&P 500":
-        peers_all = list_sp500()
-        label = "S&P 500"
+        peers_all = list_sp500(); label = "S&P 500"
     elif mode == "Dow 30":
-        peers_all = list_dow30()
-        label = "Dow 30"
+        peers_all = list_dow30(); label = "Dow 30"
     elif mode == "NASDAQ 100":
-        peers_all = list_nasdaq100()
-        label = "NASDAQ 100"
+        peers_all = list_nasdaq100(); label = "NASDAQ 100"
     elif mode == "Custom (paste list)":
         custom = {yf_symbol(t) for t in custom_raw.split(",") if t.strip()}
         return sorted(set(user) | custom)[:350], "Custom"
     else:
         sp, dj, nd = list_sp500(), list_dow30(), list_nasdaq100()
-        auto = set()
-        label = "S&P 500"
-        if len(user) == 1:
-            t = user[0]
-            if t in sp:
-                auto = sp
-                label = "S&P 500"
-            elif t in dj:
-                auto = dj
-                label = "Dow 30"
-            elif t in nd:
-                auto = nd
-                label = "NASDAQ 100"
+        auto=set(); label="S&P 500"
+        if len(user)==1:
+            t=user[0]
+            if   t in sp: auto=sp; label="S&P 500"
+            elif t in dj: auto=dj; label="Dow 30"
+            elif t in nd: auto=nd; label="NASDAQ 100"
         else:
             for t in user:
-                if t in sp:
-                    auto |= sp
-                    label = "S&P 500"
-                elif t in dj:
-                    auto |= dj
-                    label = "Dow 30"
-                elif t in nd:
-                    auto |= nd
-                    label = "NASDAQ 100"
+                if t in sp: auto|=sp; label="S&P 500"
+                elif t in dj: auto|=dj; label="Dow 30"
+                elif t in nd: auto|=nd; label="NASDAQ 100"
         peers_all = auto if auto else sp
-    peers = sorted(peers_all.difference(set(user)))[: max(1, sample_n)]
+    peers = sorted(peers_all.difference(set(user)))[:max(1, sample_n)]
     return sorted(set(user) | set(peers))[:350], label
 
 
 # ==================== Feature Builders ====================
 
 def technical_scores(price_panel: Dict[str, pd.Series]) -> pd.DataFrame:
-    rows = []
+    rows=[]
     for ticker, px in price_panel.items():
-        px = px.dropna()
-        if len(px) < 60:
-            continue
-        ema50 = ema(px, 50)
-        base50 = (
-            ema50.iloc[-1] if pd.notna(ema50.iloc[-1]) and ema50.iloc[-1] != 0 else np.nan
-        )
-        dma_gap = (px.iloc[-1] - ema50.iloc[-1]) / base50 if pd.notna(base50) else np.nan
-        _, _, hist = macd(px)
-        macd_hist = hist.iloc[-1] if len(hist) > 0 else np.nan
-        r = rsi(px).iloc[-1] if len(px) > 14 else np.nan
-        rsi_strength = (r - 50.0) / 50.0 if pd.notna(r) else np.nan
+        px=px.dropna()
+        if len(px)<60: continue
+        ema50  = ema(px,50)
+        base50 = ema50.iloc[-1] if pd.notna(ema50.iloc[-1]) and ema50.iloc[-1]!=0 else np.nan
+        dma_gap=(px.iloc[-1]-ema50.iloc[-1])/base50 if pd.notna(base50) else np.nan
+        _,_,hist = macd(px)
+        macd_hist = hist.iloc[-1] if len(hist)>0 else np.nan
+        r = rsi(px).iloc[-1] if len(px)>14 else np.nan
+        rsi_strength = (r-50.0)/50.0 if pd.notna(r) else np.nan
         mom = np.nan
         if len(px) > 252:
             try:
-                mom = px.iloc[-1] / px.iloc[-253] - 1.0
+                mom = px.iloc[-1]/px.iloc[-253]-1.0
             except Exception:
                 mom = np.nan
-        rows.append(
-            {
-                "ticker": ticker,
-                "dma_gap": dma_gap,
-                "macd_hist": macd_hist,
-                "rsi_strength": rsi_strength,
-                "mom12m": mom,
-            }
-        )
+        rows.append({"ticker":ticker,"dma_gap":dma_gap,"macd_hist":macd_hist,
+                     "rsi_strength":rsi_strength,"mom12m":mom})
     return pd.DataFrame(rows).set_index("ticker") if rows else pd.DataFrame()
 
-
-def macro_from_vix(vix_series: pd.Series) -> Tuple[float, float, float, float]:
+def macro_from_vix(vix_series: pd.Series) -> Tuple[float,float,float,float]:
     if vix_series is None or vix_series.empty:
         return 0.5, np.nan, np.nan, np.nan
     vix_last = float(vix_series.iloc[-1])
-    ema20 = float(ema(vix_series, 20).iloc[-1]) if len(vix_series) >= 20 else vix_last
-    rel_gap = (vix_last - ema20) / max(ema20, 1e-9)
-    if vix_last <= 12:
-        level = 1.0
-    elif vix_last >= 28:
-        level = 0.0
+    ema20    = float(ema(vix_series,20).iloc[-1]) if len(vix_series)>=20 else vix_last
+    rel_gap  = (vix_last-ema20)/max(ema20,1e-9)
+    if   vix_last<=12: level=1.0
+    elif vix_last>=28: level=0.0
+    else: level = 1.0-(vix_last-12)/16.0
+    if   rel_gap>=0.03: trend=0.0
+    elif rel_gap<=-0.03: trend=1.0
     else:
-        level = 1.0 - (vix_last - 12) / 16.0
-    if rel_gap >= 0.03:
-        trend = 0.0
-    elif rel_gap <= -0.03:
-        trend = 1.0
-    else:
-        trend = 1.0 - (rel_gap + 0.03) / 0.06
-        trend = float(np.clip(trend, 0, 1))
-    macro = float(np.clip(0.70 * level + 0.30 * trend, 0, 1))
+        trend = 1.0-(rel_gap+0.03)/0.06
+        trend = float(np.clip(trend,0,1))
+    macro=float(np.clip(0.70*level+0.30*trend,0,1))
     return macro, vix_last, ema20, rel_gap
 
 
 # ==================== Interpretations ====================
 
 def fundamentals_interpretation(zrow: pd.Series) -> List[str]:
-    lines: List[str] = []
-
+    lines=[]
     def bucket(v, pos_good=True):
-        if pd.isna(v):
-            return "neutral"
+        if pd.isna(v): return "neutral"
         if pos_good:
-            return "bullish" if v >= 0.5 else "watch" if v <= -0.5 else "neutral"
+            return "bullish" if v>=0.5 else "watch" if v<=-0.5 else "neutral"
         else:
-            return "bullish (cheap)" if v >= 0.5 else "watch (expensive)" if v <= -0.5 else "neutral"
+            return "bullish (cheap)" if v>=0.5 else "watch (expensive)" if v<=-0.5 else "neutral"
 
-    g = bucket(zrow.get("revenueGrowth_z"))
-    e = bucket(zrow.get("earningsGrowth_z"))
+    g  = bucket(zrow.get("revenueGrowth_z"))
+    e  = bucket(zrow.get("earningsGrowth_z"))
     pm = bucket(zrow.get("profitMargins_z"))
     gm = bucket(zrow.get("grossMargins_z"))
     om = bucket(zrow.get("operatingMargins_z"))
-    roe = bucket(zrow.get("returnOnEquity_z"))
-    val = bucket(zrow.get("forwardPE_z"), pos_good=False)
-    lev = bucket(zrow.get("debtToEquity_z"), pos_good=False)
+    roe= bucket(zrow.get("returnOnEquity_z"))
+    val= bucket(zrow.get("forwardPE_z"), pos_good=False)
+    lev= bucket(zrow.get("debtToEquity_z"), pos_good=False)
 
-    if g == "bullish" or e == "bullish":
-        lines.append("**Growth tilt:** above-peer revenue/earnings growth (supportive).")
-    elif g == "watch" or e == "watch":
-        lines.append("**Growth tilt:** below peers — watch for stabilization or re-acceleration.")
-    else:
-        lines.append("**Growth tilt:** broadly in line with peers.")
+    if g=="bullish" or e=="bullish": lines.append("**Growth tilt:** above-peer revenue/earnings growth (supportive).")
+    elif g=="watch" or e=="watch":   lines.append("**Growth tilt:** below peers — watch for stabilization or re-acceleration.")
+    else:                            lines.append("**Growth tilt:** broadly in line with peers.")
 
-    if pm == "bullish" or gm == "bullish" or om == "bullish" or roe == "bullish":
+    if (pm=="bullish" or gm=="bullish" or om=="bullish" or roe=="bullish"):
         lines.append("**Profitability & margins:** strong vs peers (healthy quality).")
-    elif pm == "watch" or gm == "watch" or om == "watch" or roe == "watch":
+    elif (pm=="watch" or gm=="watch" or om=="watch" or roe=="watch"):
         lines.append("**Profitability:** below peer medians — monitor margin trajectory.")
     else:
         lines.append("**Profitability:** roughly peer-like.")
@@ -515,5 +404,4 @@ def fundamentals_interpretation(zrow: pd.Series) -> List[str]:
         lines.append("**Balance sheet:** higher leverage vs peers — keep an eye on rates/cash flow.")
     else:
         lines.append("**Balance sheet:** typical for the peer set.")
-
     return lines
