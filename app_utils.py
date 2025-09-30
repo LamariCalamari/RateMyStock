@@ -16,28 +16,27 @@ def inject_css():
         <style>
         .block-container{max-width:1140px;}
 
-        /* Sidebar: replace the small 'app' pill text with 'Home' */
-        section[data-testid="stSidebar"] [data-testid="stSidebarNav"] > div:first-child{
-          position:relative;
-          color:transparent !important;         /* hide original text */
+        /* Hide native 'app' pill and show our own */
+        [data-testid="stSidebarNav"] > div:first-child{ display:none !important; }
+        .pill{
+          display:inline-block; padding:8px 14px; border-radius:10px;
+          background:#2d3037; color:#e9edf0; font-weight:700; margin:6px 0 2px;
+          border:1px solid #3a3f46;
         }
-        section[data-testid="stSidebar"] [data-testid="stSidebarNav"] > div:first-child::after{
-          content:"Home";
-          position:absolute; inset:auto auto auto 14px;
-          top:8px; color:#e7ebf0; font-weight:700; letter-spacing:.2px;
+        .pill-home{
+          background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(0,0,0,.06)) padding-box,
+                     linear-gradient(90deg,#e85d58, #f39c12, #2ecc71) border-box;
+          border:1px solid transparent; color:#f4f6f8;
         }
 
-        /* Brand header: logo next to title, centered */
-        .brand{ display:flex; align-items:center; justify-content:center; gap:16px; margin:1.1rem 0 .35rem; }
-        .brand .wordmark{
-          font-size:56px; line-height:1; font-weight:900; margin:0;
-          background:linear-gradient(90deg,#e74c3c 0%, #f39c12 50%, #2ecc71 100%);
-          -webkit-background-clip:text; background-clip:text; color:transparent;
-          letter-spacing:.3px;
+        /* Brand header */
+        .brand{
+          display:flex;align-items:center;justify-content:center;gap:16px;
+          margin:1.0rem 0 .25rem;
         }
-        .logo{ width:56px; height:52px; flex:0 0 auto; }
+        .logo{width:56px;height:52px;flex:0 0 auto;}
 
-        /* KPI + misc (from your original) */
+        /* KPI + misc (original styles) */
         .kpi-card{padding:1rem 1.1rem;border-radius:12px;background:#111418;border:1px solid #222}
         .kpi-num{font-size:2.2rem;font-weight:800;margin-top:.25rem}
         .small-muted{color:#9aa0a6;font-size:.9rem}
@@ -45,23 +44,23 @@ def inject_css():
         .chart-caption{color:#9aa0a6;margin:-.5rem 0 1rem}
         .topbar{display:flex;justify-content:flex-end;margin:.2rem 0 .6rem}
 
-        /* CTA Boxes */
+        /* CTA Boxes (used on Home) */
         .cta-box{
           display:block; text-align:center; padding:16px 18px; border-radius:14px;
-          background:#15181d; border:1px solid #2e3238;
+          background:#15181d; border:1px solid #2e3238; min-width:240px;
           box-shadow:0 1px 0 rgba(255,255,255,.06) inset, 0 8px 24px rgba(0,0,0,.35);
+          transition:transform .08s ease, box-shadow .16s ease, border-color .12s ease, background .12s ease;
         }
-        .cta-box:hover{ background:#181c22; border-color:#3a4048; }
+        .cta-box:hover{ background:#181c22; border-color:#3a4048; transform:translateY(-1px); }
         .cta-box a[data-testid="stPageLink"]{
           display:inline-flex; align-items:center; gap:.6rem; font-weight:800; color:#e9edf0; text-decoration:none;
+          white-space:nowrap;
         }
-        /* Make first CTA stand out with the brand gradient frame */
         .cta-box.primary{
           background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(0,0,0,.06)) padding-box,
                      linear-gradient(90deg,#e85d58, #f39c12, #2ecc71) border-box;
           border:1px solid transparent;
         }
-
         </style>
         """,
         unsafe_allow_html=True,
@@ -82,9 +81,13 @@ def inline_logo_svg() -> str:
 
 
 def brand_header(title: str):
-    """Centered logo + gradient wordmark — no Markdown escaping issues."""
-    # No leading spaces before the <div> to avoid Markdown treating it as code.
-    html = f"""<div class="brand">{inline_logo_svg()}<div class="wordmark">{title}</div></div>"""
+    gradient = ("background:linear-gradient(90deg,#e74c3c 0%,#f39c12 50%,#2ecc71 100%);"
+                "-webkit-background-clip:text;background-clip:text;color:transparent;")
+    html = (
+        f'<div class="brand">{inline_logo_svg()}'
+        f'<h1 style="font-size:56px;margin:0;line-height:1;font-weight:900;letter-spacing:.3px;{gradient}">{title}</h1>'
+        f'</div>'
+    )
     st.markdown(html, unsafe_allow_html=True)
 
 
@@ -94,7 +97,7 @@ def topbar_back(label: str = "← Back", url: str | None = None):
         st.page_link(url, label=label)
     st.markdown("</div>", unsafe_allow_html=True)
 
-# ==================== Finance Helpers (original logic retained) ====================
+# ==================== Core finance helpers ====================
 
 def yf_symbol(t: str) -> str:
     if not isinstance(t, str):
@@ -133,7 +136,7 @@ def zscore_series(s: pd.Series) -> pd.Series:
 def percentile_rank(s: pd.Series) -> pd.Series:
     return s.rank(pct=True) * 100.0
 
-# ==================== Fetchers (chunked + retries) ====================
+# ==================== Robust fetchers ====================
 
 @st.cache_data(show_spinner=False)
 def fetch_prices_chunked_with_fallback(
@@ -160,15 +163,18 @@ def fetch_prices_chunked_with_fallback(
             if t in got:
                 s = df[t]["Close"].dropna()
                 if s.size:
-                    frames.append(s.rename(t)); ok.append(t)
+                    frames.append(s.rename(t))
+                    ok.append(t)
 
-    # Bulk
+    # Bulk pass
     for i in range(0, len(tickers), chunk):
-        group = tickers[i:i+chunk]
+        group = tickers[i : i + chunk]
         try:
-            df = yf.download(group, period=period, interval=interval,
-                             auto_adjust=True, group_by="ticker",
-                             threads=False, progress=False)
+            df = yf.download(
+                group, period=period, interval=interval,
+                auto_adjust=True, group_by="ticker",
+                threads=False, progress=False
+            )
             if isinstance(df.columns, pd.MultiIndex):
                 _append_from_multi(df, group)
             else:
@@ -184,19 +190,23 @@ def fetch_prices_chunked_with_fallback(
     ok_set = set(ok)
     missing = [t for t in tickers if t not in ok_set]
 
-    # Singles
+    # Single retries
     if missing:
         for _ in range(retries):
             new_missing = []
             for t in missing:
                 try:
-                    df = yf.download(t, period=period, interval=interval,
-                                     auto_adjust=True, group_by="ticker",
-                                     threads=False, progress=False)
+                    df = yf.download(
+                        t, period=period, interval=interval,
+                        auto_adjust=True, group_by="ticker",
+                        threads=False, progress=False
+                    )
                     if "Close" in df:
                         s = df["Close"].dropna()
-                        if s.size: frames.append(s.rename(t)); ok.append(t)
-                        else: new_missing.append(t)
+                        if s.size:
+                            frames.append(s.rename(t)); ok.append(t)
+                        else:
+                            new_missing.append(t)
                     else:
                         new_missing.append(t)
                 except Exception:
@@ -224,24 +234,28 @@ def fetch_vix_series(period: str = "6mo", interval: str = "1d") -> pd.Series:
 
 @st.cache_data(show_spinner=False)
 def fetch_fundamentals_simple(tickers: List[str]) -> pd.DataFrame:
-    keep = ["revenueGrowth","earningsGrowth","returnOnEquity",
-            "profitMargins","grossMargins","operatingMargins","ebitdaMargins",
-            "trailingPE","forwardPE","debtToEquity"]
-    rows=[]
+    keep = [
+        "revenueGrowth","earningsGrowth","returnOnEquity",
+        "profitMargins","grossMargins","operatingMargins","ebitdaMargins",
+        "trailingPE","forwardPE","debtToEquity",
+    ]
+    rows = []
     for raw in tickers:
-        t=yf_symbol(raw)
+        t = yf_symbol(raw)
         try:
             info = yf.Ticker(t).info or {}
         except Exception:
-            info={}
-        row={"ticker":t}
+            info = {}
+        row = {"ticker": t}
         for k in keep:
-            try: row[k]=float(info.get(k, np.nan))
-            except Exception: row[k]=np.nan
+            try:
+                row[k] = float(info.get(k, np.nan))
+            except Exception:
+                row[k] = np.nan
         rows.append(row)
     return pd.DataFrame(rows).set_index("ticker")
 
-# ==================== Peer Universes & Feature Builders (unchanged) ====================
+# ==================== Peer universes ====================
 
 SP500_FALLBACK = ["AAPL","MSFT","AMZN","NVDA","META","GOOGL","GOOG","TSLA","AVGO","BRK-B","UNH","LLY","V","JPM"]
 DOW30_FALLBACK = ["AAPL","MSFT","JPM","V","JNJ","WMT","PG","UNH","DIS","HD","INTC","IBM","KO","MCD","NKE","TRV","VZ","CSCO"]
@@ -269,19 +283,21 @@ def list_nasdaq100() -> set:
     except Exception: pass
     return set(NASDAQ100_FALLBACK)
 
-def build_universe(user_tickers: List[str], mode: str, sample_n: int = 150, custom_raw: str = "") -> Tuple[List[str], str]:
+def build_universe(
+    user_tickers: List[str], mode: str, sample_n: int = 150, custom_raw: str = ""
+) -> Tuple[List[str], str]:
     user = [yf_symbol(t) for t in user_tickers]
     if mode == "S&P 500":
-        peers_all = list_sp500(); label="S&P 500"
+        peers_all = list_sp500(); label = "S&P 500"
     elif mode == "Dow 30":
-        peers_all = list_dow30(); label="Dow 30"
+        peers_all = list_dow30(); label = "Dow 30"
     elif mode == "NASDAQ 100":
-        peers_all = list_nasdaq100(); label="NASDAQ 100"
+        peers_all = list_nasdaq100(); label = "NASDAQ 100"
     elif mode == "Custom (paste list)":
         custom = {yf_symbol(t) for t in custom_raw.split(",") if t.strip()}
-        return sorted(set(user)|custom)[:350], "Custom"
+        return sorted(set(user) | custom)[:350], "Custom"
     else:
-        sp,dj,nd = list_sp500(), list_dow30(), list_nasdaq100()
+        sp, dj, nd = list_sp500(), list_dow30(), list_nasdaq100()
         auto=set(); label="S&P 500"
         if len(user)==1:
             t=user[0]
@@ -295,7 +311,9 @@ def build_universe(user_tickers: List[str], mode: str, sample_n: int = 150, cust
                 elif t in nd: auto|=nd; label="NASDAQ 100"
         peers_all = auto if auto else sp
     peers = sorted(peers_all.difference(set(user)))[:max(1, sample_n)]
-    return sorted(set(user)|set(peers))[:350], label
+    return sorted(set(user) | set(peers))[:350], label
+
+# ==================== Feature builders ====================
 
 def technical_scores(price_panel: Dict[str, pd.Series]) -> pd.DataFrame:
     rows=[]
@@ -338,11 +356,8 @@ def fundamentals_interpretation(zrow: pd.Series) -> List[str]:
     lines=[]
     def bucket(v, pos_good=True):
         if pd.isna(v): return "neutral"
-        if pos_good:
-            return "bullish" if v>=0.5 else "watch" if v<=-0.5 else "neutral"
-        else:
-            return "bullish (cheap)" if v>=0.5 else "watch (expensive)" if v<=-0.5 else "neutral"
-
+        if pos_good:  return "bullish" if v>=0.5 else "watch" if v<=-0.5 else "neutral"
+        else:         return "bullish (cheap)" if v>=0.5 else "watch (expensive)" if v<=-0.5 else "neutral"
     g  = bucket(zrow.get("revenueGrowth_z"))
     e  = bucket(zrow.get("earningsGrowth_z"))
     pm = bucket(zrow.get("profitMargins_z"))
@@ -362,12 +377,14 @@ def fundamentals_interpretation(zrow: pd.Series) -> List[str]:
         lines.append("**Profitability:** below peer medians — monitor margin trajectory.")
     else:
         lines.append("**Profitability:** roughly peer-like.")
+
     if val.startswith("bullish"):
         lines.append("**Valuation tilt:** cheaper than peers (potential multiple support).")
     elif val.startswith("watch"):
         lines.append("**Valuation tilt:** richer than peers — execution must stay strong.")
     else:
         lines.append("**Valuation tilt:** roughly fair vs peers.")
+
     if lev.startswith("bullish"):
         lines.append("**Balance sheet:** lower leverage vs peers (lower financial risk).")
     elif lev.startswith("watch"):
@@ -375,3 +392,87 @@ def fundamentals_interpretation(zrow: pd.Series) -> List[str]:
     else:
         lines.append("**Balance sheet:** typical for the peer set.")
     return lines
+
+# ==================== Reusable charts ====================
+
+def draw_stock_charts(ticker: str, series: pd.Series):
+    if series is None or series.empty:
+        st.info("Not enough history to show charts.")
+        return
+    st.subheader("📈 Price & EMAs")
+    e20, e50 = ema(series, 20), ema(series, 50)
+    price_df = pd.DataFrame({"Close": series, "EMA20": e20, "EMA50": e50})
+    st.line_chart(price_df, use_container_width=True)
+    st.caption("If price is **above EMA50/EMA20**, trend bias is positive; **below** suggests a headwind.")
+
+    st.subheader("📉 MACD")
+    line, sig, hist = macd(series)
+    st.line_chart(pd.DataFrame({"MACD line": line, "Signal": sig}), use_container_width=True)
+    st.bar_chart(pd.DataFrame({"Histogram": hist}), use_container_width=True)
+    st.caption("Rising histogram above zero → momentum building; falling below zero → fading.")
+
+    st.subheader("🔁 RSI (14)")
+    st.line_chart(pd.DataFrame({"RSI(14)": rsi(series)}), use_container_width=True)
+    st.caption(">70 = overbought • <30 = oversold • around 50 = neutral trend strength.")
+
+    st.subheader("🚀 12-month momentum")
+    if len(series) > 252:
+        mom12 = series/series.shift(253)-1.0
+        st.line_chart(pd.DataFrame({"12m momentum": mom12}), use_container_width=True)
+        st.caption("Positive vs one year ago → outperformance; negative → underperformance.")
+    else:
+        st.info("Need > 1 year of data to show the 12-month momentum line.")
+
+# ==================== Portfolio helpers ====================
+
+CURRENCY_MAP = {"$":"USD","€":"EUR","£":"GBP","CHF":"CHF","C$":"CAD","A$":"AUD","¥":"JPY"}
+
+def _safe_num(x): return pd.to_numeric(x, errors="coerce")
+
+def normalize_percents_to_100(p: pd.Series) -> pd.Series:
+    p = _safe_num(p).fillna(0.0)
+    s = p.sum()
+    if s <= 0: return p
+    return (p / s) * 100.0
+
+def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFrame:
+    df=df.copy()
+    df["Ticker"]=df["Ticker"].astype(str).str.strip()
+    df=df[df["Ticker"].astype(bool)].reset_index(drop=True)
+    n=len(df)
+    if n==0:
+        df["weight"]=[]
+        return df
+
+    df["Percent (%)"]=_safe_num(df.get("Percent (%)"))
+    df["Amount"]=_safe_num(df.get("Amount"))
+    has_total = (total is not None and total>0)
+
+    if has_total:
+        if mode=="percent":
+            if df["Percent (%)"].fillna(0).sum()==0:
+                df["Percent (%)"]=100.0/n
+            df["Percent (%)"] = normalize_percents_to_100(df["Percent (%)"]).round(2)
+            df["Amount"]=(df["Percent (%)"]/100.0*total).round(2)
+        else:
+            s=df["Amount"].fillna(0).sum()
+            if s>0:
+                df["Percent (%)"]= (df["Amount"]/total*100.0).round(2)
+                df["Percent (%)"]= normalize_percents_to_100(df["Percent (%)"]).round(2)
+                df["Amount"]= (df["Percent (%)"]/100.0*total).round(2)
+            else:
+                df["Percent (%)"]=100.0/n
+                df["Amount"]= (df["Percent (%)"]/100.0*total).round(2)
+    else:
+        if df["Percent (%)"].fillna(0).sum()==0:
+            df["Percent (%)"]=100.0/n
+        df["Percent (%)"]= normalize_percents_to_100(df["Percent (%)"]).round(2)
+
+    if has_total and df["Amount"].fillna(0).sum()>0:
+        w=df["Amount"].fillna(0)/df["Amount"].fillna(0).sum()
+    elif df["Percent (%)"].fillna(0).sum()>0:
+        w=df["Percent (%)"].fillna(0)/df["Percent (%)"].fillna(0).sum()
+    else:
+        w=pd.Series([1.0/n]*n, index=df.index)
+    df["weight"]=w
+    return df
