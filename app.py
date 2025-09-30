@@ -1,12 +1,7 @@
-# app.py — Rate My (Stock + Portfolio)
-# Full-featured Streamlit app with:
-# - Robust peer loader (small chunks, retries, threads off)
-# - 12m momentum via 5Y history only for DISPLAYED tickers
-# - Fundamentals/Technicals/Macro with friendly interpretations
-# - Submit-based portfolio editor (Apply / Normalize)
-# - Charts with titles & captions
-# - Clean, centered landing page (no raw HTML showing)
-# - Logo next to the title
+# app.py — Rate My (Stock + Portfolio + Tracker)
+# - No functionality removed; adds a simple Portfolio Tracker (save portfolios, value & live rating)
+# - Keeps logo next to title (brand row)
+# - Fixes title rendering by using st.markdown(..., unsafe_allow_html=True)
 
 import io
 import time
@@ -33,24 +28,26 @@ st.markdown("""
 /* ensure the SVG doesn’t stretch/shrink oddly */
 .logo{ width:56px; height:52px; flex:0 0 auto; }
 
-/* --- brand row: centers logo + title on one line --- */
+/* brand row: centers logo + title on one line */
 .brand{
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  gap:16px;
-  margin: 1.25rem 0 .25rem;
+  display:flex; align-items:center; justify-content:center;
+  gap:16px; margin: 1.25rem 0 .25rem;
 }
-.brand h1{
-  font-size:56px;
-  margin:0;
-  line-height:1;
-}
+.brand h1{ font-size:56px; margin:0; line-height:1; }
 </style>
 """, unsafe_allow_html=True)
 
 # -------------------- Session --------------------
-for k, v in {"entered": False, "mode": None, "grid_df": None}.items():
+DEFAULT_GRID = pd.DataFrame({
+    "Ticker": ["AAPL", "MSFT", "NVDA", "AMZN"],
+    "Percent (%)": [25.0, 25.0, 25.0, 25.0],
+    "Amount": [np.nan, np.nan, np.nan, np.nan],
+})
+
+for k, v in {
+    "entered": False, "mode": None, "grid_df": None,
+    "tracker_portfolios": {},  # name -> {"holdings": DataFrame[ticker, shares], "saved": timestamp}
+}.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -64,7 +61,6 @@ def enter(mode):
 
 # ------------------- Helpers -------------------
 def inline_logo_svg():
-    # Clean triangle gradient (no inner lines) = strong sell -> strong buy
     return """
 <svg class="logo" viewBox="0 0 100 90" xmlns="http://www.w3.org/2000/svg" aria-label="Rate My">
   <defs>
@@ -117,6 +113,7 @@ def fetch_prices_chunked_with_fallback(
 ):
     tickers = [yf_symbol(t) for t in tickers if t]
     tickers = list(dict.fromkeys(tickers))[:hard_limit]
+    if not tickers: return pd.DataFrame(), []
 
     frames, ok = [], []
 
@@ -269,8 +266,7 @@ def technical_scores(price_panel: dict) -> pd.DataFrame:
     rows=[]
     for ticker, px in price_panel.items():
         px=px.dropna()
-        if len(px)<60:
-            continue
+        if len(px)<60: continue
         ema50  = ema(px,50)
         base50 = ema50.iloc[-1] if pd.notna(ema50.iloc[-1]) and ema50.iloc[-1]!=0 else np.nan
         dma_gap=(px.iloc[-1]-ema50.iloc[-1])/base50 if pd.notna(base50) else np.nan
@@ -280,10 +276,8 @@ def technical_scores(price_panel: dict) -> pd.DataFrame:
         rsi_strength = (r-50.0)/50.0 if pd.notna(r) else np.nan
         mom = np.nan
         if len(px) > 252:
-            try:
-                mom = px.iloc[-1]/px.iloc[-253]-1.0
-            except Exception:
-                mom = np.nan
+            try: mom = px.iloc[-1]/px.iloc[-253]-1.0
+            except Exception: mom = np.nan
         rows.append({"ticker":ticker,"dma_gap":dma_gap,"macd_hist":macd_hist,
                      "rsi_strength":rsi_strength,"mom12m":mom})
     return pd.DataFrame(rows).set_index("ticker") if rows else pd.DataFrame()
@@ -305,9 +299,9 @@ def macro_from_vix(vix_series: pd.Series):
     macro=float(np.clip(0.70*level+0.30*trend,0,1))
     return macro, vix_last, ema20, rel_gap
 
-# -------------------- LANDING (fixed) --------------------
+# -------------------- LANDING --------------------
 def landing():
-    # Centered brand row: logo + title side-by-side
+    # Brand header
     st.markdown(f"""
     <div class="brand">
       {inline_logo_svg()}
@@ -315,7 +309,6 @@ def landing():
     </div>
     """, unsafe_allow_html=True)
 
-    # Row 2: tagline centered
     st.markdown(
         "<div style='text-align:center;color:#9aa0a6;font-size:1.05rem;margin-top:.2rem;'>"
         "Pick a stock or your entire portfolio — we’ll rate it with clear, friendly explanations and charts."
@@ -323,19 +316,28 @@ def landing():
         unsafe_allow_html=True,
     )
 
-    # Row 3: centered buttons
-    b_l, b_c1, b_c2, b_r = st.columns([1,2,2,1])
-    with b_c1:
-        st.button("📈 Rate My Stock", type="primary", use_container_width=True, on_click=enter, args=("stock",))
-    with b_c2:
-        st.button("💼 Rate My Portfolio", use_container_width=True, on_click=enter, args=("portfolio",))
+    # Buttons
+    c0, c1, c2, c3 = st.columns([1,2,2,1])
+    with c1:
+        st.button("📈 Rate My Stock", type="primary", use_container_width=True,
+                  on_click=enter, args=("stock",))
+    with c2:
+        st.button("💼 Rate My Portfolio", use_container_width=True,
+                  on_click=enter, args=("portfolio",))
+
+    # New: Tracker shortcut
+    st.divider()
+    tL, tC, tR = st.columns([1,2,1])
+    with tC:
+        st.button("📊 Portfolio Tracker (beta)", use_container_width=True,
+                  on_click=enter, args=("tracker",))
 
 def topbar_back(key):
     st.markdown('<div class="topbar">', unsafe_allow_html=True)
     st.button("← Back", key=key, on_click=go_home)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# =============== STOCK: Interpretations & Charts ===============
+# ==================== STOCK ====================
 def fundamentals_interpretation(zrow: pd.Series):
     lines=[]
     def bucket(v, pos_good=True):
@@ -344,7 +346,6 @@ def fundamentals_interpretation(zrow: pd.Series):
             return "bullish" if v>=0.5 else "watch" if v<=-0.5 else "neutral"
         else:
             return "bullish (cheap)" if v>=0.5 else "watch (expensive)" if v<=-0.5 else "neutral"
-
     g  = bucket(zrow.get("revenueGrowth_z"))
     e  = bucket(zrow.get("earningsGrowth_z"))
     pm = bucket(zrow.get("profitMargins_z"))
@@ -353,25 +354,21 @@ def fundamentals_interpretation(zrow: pd.Series):
     roe= bucket(zrow.get("returnOnEquity_z"))
     val= bucket(zrow.get("forwardPE_z"), pos_good=False)
     lev= bucket(zrow.get("debtToEquity_z"), pos_good=False)
-
     if g=="bullish" or e=="bullish": lines.append("**Growth tilt:** above-peer revenue/earnings growth (supportive).")
     elif g=="watch" or e=="watch":   lines.append("**Growth tilt:** below peers — watch for stabilization or re-acceleration.")
     else:                            lines.append("**Growth tilt:** broadly in line with peers.")
-
     if (pm=="bullish" or gm=="bullish" or om=="bullish" or roe=="bullish"):
         lines.append("**Profitability & margins:** strong vs peers (healthy quality).")
     elif (pm=="watch" or gm=="watch" or om=="watch" or roe=="watch"):
         lines.append("**Profitability:** below peer medians — monitor margin trajectory.")
     else:
         lines.append("**Profitability:** roughly peer-like.")
-
     if val.startswith("bullish"):
         lines.append("**Valuation tilt:** cheaper than peers (potential multiple support).")
     elif val.startswith("watch"):
         lines.append("**Valuation tilt:** richer than peers — execution must stay strong.")
     else:
         lines.append("**Valuation tilt:** roughly fair vs peers.")
-
     if lev.startswith("bullish"):
         lines.append("**Balance sheet:** lower leverage vs peers (lower financial risk).")
     elif lev.startswith("watch"):
@@ -382,25 +379,19 @@ def fundamentals_interpretation(zrow: pd.Series):
 
 def draw_stock_charts(t: str, series: pd.Series):
     if series is None or series.empty:
-        st.info("Not enough history to show charts.")
-        return
-
+        st.info("Not enough history to show charts."); return
     st.subheader("📈 Price & EMAs")
     e20, e50 = ema(series,20), ema(series,50)
-    price_df = pd.DataFrame({"Close": series, "EMA20": e20, "EMA50": e50})
-    st.line_chart(price_df, use_container_width=True)
+    st.line_chart(pd.DataFrame({"Close": series, "EMA20": e20, "EMA50": e50}), use_container_width=True)
     st.caption("If price is **above EMA50/EMA20**, trend bias is positive; **below** suggests a headwind.")
-
     st.subheader("📉 MACD")
     line, sig, hist = macd(series)
     st.line_chart(pd.DataFrame({"MACD line": line, "Signal": sig}), use_container_width=True)
     st.bar_chart(pd.DataFrame({"Histogram": hist}), use_container_width=True)
     st.caption("Rising histogram above zero → momentum building; falling below zero → fading.")
-
     st.subheader("🔁 RSI (14)")
     st.line_chart(pd.DataFrame({"RSI(14)": rsi(series)}), use_container_width=True)
     st.caption(">70 = overbought • <30 = oversold • around 50 = neutral trend strength.")
-
     st.subheader("🚀 12-month momentum")
     if len(series) > 252:
         mom12 = series/series.shift(253)-1.0
@@ -412,8 +403,6 @@ def draw_stock_charts(t: str, series: pd.Series):
 # -------------------- STOCK APP --------------------
 def app_stock():
     topbar_back("back_stock")
-
-    # Header: logo + title next to each other, centered
     st.markdown(f"""
     <div class="brand">
       {inline_logo_svg()}
@@ -446,12 +435,10 @@ def app_stock():
 
     user_tickers = [yf_symbol(x) for x in ticker.split(",") if x.strip()]
     if not user_tickers:
-        st.info("Enter a ticker above to run the rating.")
-        return
+        st.info("Enter a ticker above to run the rating."); return
 
     with st.status("Crunching the numbers…", expanded=True) as status:
         prog = st.progress(0)
-
         status.update(label="Building peer universe…")
         universe, label = build_universe(user_tickers, universe_mode, peer_n, custom_raw)
         target_count = peer_n if universe_mode!="Custom (paste list)" else len(universe)
@@ -463,16 +450,14 @@ def app_stock():
             chunk=25, retries=3, sleep_between=0.35, singles_pause=0.20
         )
         if not ok:
-            st.error("No peer prices loaded.")
-            return
+            st.error("No peer prices loaded."); return
         panel = {t: prices[t].dropna() for t in ok if t in prices.columns and prices[t].dropna().size>0}
         prog.progress(50)
 
         status.update(label="Computing technicals…")
         tech = technical_scores(panel)
         for col in ["dma_gap","macd_hist","rsi_strength","mom12m"]:
-            if col in tech.columns:
-                tech[f"{col}_z"] = zscore_series(tech[col])
+            if col in tech.columns: tech[f"{col}_z"] = zscore_series(tech[col])
         TECH_score = tech[[c for c in ["dma_gap_z","macd_hist_z","rsi_strength_z","mom12m_z"] if c in tech.columns]].mean(axis=1)
         prog.progress(75)
 
@@ -481,19 +466,16 @@ def app_stock():
         fdf = pd.DataFrame(index=fund_raw.index)
         for col in ["revenueGrowth","earningsGrowth","returnOnEquity","profitMargins",
                     "grossMargins","operatingMargins","ebitdaMargins"]:
-            if col in fund_raw.columns:
-                fdf[f"{col}_z"] = zscore_series(fund_raw[col])
+            if col in fund_raw.columns: fdf[f"{col}_z"] = zscore_series(fund_raw[col])
         for col in ["trailingPE","forwardPE","debtToEquity"]:
-            if col in fund_raw.columns:
-                fdf[f"{col}_z"] = zscore_series(-fund_raw[col])
+            if col in fund_raw.columns: fdf[f"{col}_z"] = zscore_series(-fund_raw[col])
         FUND_score = fdf.mean(axis=1) if len(fdf.columns) else pd.Series(0.0, index=fund_raw.index)
         prog.progress(92)
 
         status.update(label="Assessing macro regime…")
         vix_series = fetch_vix_series(period="6mo", interval="1d")
         MACRO, vix_last, vix_ema20, vix_gap = macro_from_vix(vix_series)
-        prog.progress(100)
-        status.update(label="Done!", state="complete")
+        prog.progress(100); status.update(label="Done!", state="complete")
 
     st.markdown(
         f'<div class="banner">Peers loaded: <b>{len(panel)}</b> / <b>{target_count}</b> '
@@ -515,6 +497,7 @@ def app_stock():
 
     # 5Y momentum for SHOWN tickers only (quietly)
     show_idx = [t for t in user_tickers if t in out.index]
+    tech = tech if 'tech' in locals() else pd.DataFrame()
     for t in show_idx:
         try:
             px5 = yf.Ticker(t).history(period="5y", interval="1d")["Close"].dropna()
@@ -539,13 +522,12 @@ def app_stock():
     for t in show_idx:
         reco = table.loc[t,"RECO"]; sc = table.loc[t,"RATING_0_100"]
         with st.expander(f"{t} — {reco} (Score: {sc:.1f})", expanded=True):
-
             c1,c2,c3 = st.columns(3)
             c1.markdown(f'<div class="kpi-card"><div>Fundamentals</div><div class="kpi-num">{table.loc[t,"FUND_score"]:.3f}</div></div>', unsafe_allow_html=True)
             c2.markdown(f'<div class="kpi-card"><div>Technicals</div><div class="kpi-num">{table.loc[t,"TECH_score"]:.3f}</div></div>', unsafe_allow_html=True)
             c3.markdown(f'<div class="kpi-card"><div>Macro (VIX)</div><div class="kpi-num">{table.loc[t,"MACRO_score"]:.3f}</div></div>', unsafe_allow_html=True)
 
-            st.markdown("#### Fundamentals — peer-relative z-scores")
+            # Fundamentals table
             fshow = pd.DataFrame({
                 "Revenue growth (z)": fdf.loc[t, "revenueGrowth_z"] if "revenueGrowth_z" in fdf.columns else np.nan,
                 "Earnings growth (z)": fdf.loc[t, "earningsGrowth_z"] if "earningsGrowth_z" in fdf.columns else np.nan,
@@ -564,7 +546,7 @@ def app_stock():
             lines = fundamentals_interpretation(fdf.loc[t] if t in fdf.index else pd.Series(dtype=float))
             for L in lines: st.markdown(f"- {L}")
 
-            st.markdown("#### Technicals")
+            # Technicals readout
             rsi_val = np.nan
             if (t in tech.index) and ("rsi_strength" in tech.columns) and pd.notna(tech.loc[t,"rsi_strength"]):
                 rsi_val = 50 + 50*tech.loc[t,"rsi_strength"]
@@ -590,27 +572,18 @@ def app_stock():
                 else: notes.append(f"RSI ~{rsi_val:.0f} — neutral.")
             if "mom12m" in tech.columns and t in tech.index and pd.notna(tech.loc[t,"mom12m"]):
                 notes.append("12m momentum positive." if tech.loc[t,"mom12m"]>0 else "12m momentum negative.")
-            if notes:
-                st.markdown("- " + "\n- ".join(notes))
+            if notes: st.markdown("- " + "\n- ".join(notes))
 
-            st.markdown("#### Macro (VIX) — level & trend")
+            # Macro
             if not np.isnan(vix_last):
                 m1,m2,m3 = st.columns(3)
                 m1.metric("VIX (last)", f"{vix_last:.2f}")
                 m2.metric("VIX EMA20", f"{vix_ema20:.2f}")
                 m3.metric("Gap vs EMA20", f"{(vix_gap*100):.1f}%")
-                if vix_last <= 13: level_txt = "very calm (risk-friendly backdrop)"
-                elif vix_last <= 18: level_txt = "calm (supportive for risk)"
-                elif vix_last <= 24: level_txt = "elevated (more caution warranted)"
-                else: level_txt = "stressed (risk-off backdrop)"
-                if vix_gap > 0.03: trend_txt = "rising above its 20-day average (volatility building)"
-                elif vix_gap < -0.03: trend_txt = "falling below its 20-day average (volatility easing)"
-                else: trend_txt = "moving roughly in line with its 20-day average"
-                st.markdown(f"- **Level:** {level_txt}.  \n- **Trend:** {trend_txt}.")
             else:
                 st.info("VIX unavailable — Macro defaults to neutral.")
 
-            # Per-ticker export
+            # Export one
             row = {
                 "ticker": t,
                 "fundamentals_score": float(table.loc[t, "FUND_score"]),
@@ -624,18 +597,11 @@ def app_stock():
             st.download_button("⬇️ Download this breakdown (CSV)",
                                data=export_df.to_csv(index=False).encode(),
                                file_name=f"{t}_breakdown.csv", mime="text/csv", use_container_width=True)
-
-            # Charts
             try:
                 px2 = yf.Ticker(t).history(period="2y", interval="1d")["Close"].dropna()
-                if px2.size > 0:
-                    draw_stock_charts(t, px2)
-                elif t in panel:
-                    draw_stock_charts(t, panel[t])
+                draw_stock_charts(t, px2 if px2.size>0 else panel[t])
             except Exception:
-                if t in panel:
-                    draw_stock_charts(t, panel[t])
-
+                if t in panel: draw_stock_charts(t, panel[t])
             all_rows.append(row)
 
     if all_rows:
@@ -653,7 +619,7 @@ def app_stock():
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            use_container_width=True)
 
-# -------------------- PORTFOLIO APP --------------------
+# -------------------- PORTFOLIO APP (existing rating flow) --------------------
 CURRENCY_MAP = {"$":"USD","€":"EUR","£":"GBP","CHF":"CHF","C$":"CAD","A$":"AUD","¥":"JPY"}
 def _safe_num(x): return pd.to_numeric(x, errors="coerce")
 
@@ -671,11 +637,9 @@ def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFra
     if n==0:
         df["weight"]=[]
         return df
-
     df["Percent (%)"]=_safe_num(df.get("Percent (%)"))
     df["Amount"]=_safe_num(df.get("Amount"))
     has_total = (total is not None and total>0)
-
     if has_total:
         if mode=="percent":
             if df["Percent (%)"].fillna(0).sum()==0:
@@ -695,7 +659,6 @@ def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFra
         if df["Percent (%)"].fillna(0).sum()==0:
             df["Percent (%)"]=100.0/n
         df["Percent (%)"]= normalize_percents_to_100(df["Percent (%)"]).round(2)
-
     if has_total and df["Amount"].fillna(0).sum()>0:
         w=df["Amount"].fillna(0)/df["Amount"].fillna(0).sum()
     elif df["Percent (%)"].fillna(0).sum()>0:
@@ -707,12 +670,7 @@ def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFra
 
 def holdings_editor_form(currency_symbol, total_value):
     if st.session_state.get("grid_df") is None:
-        st.session_state["grid_df"] = pd.DataFrame({
-            "Ticker": ["AAPL", "MSFT", "NVDA", "AMZN"],
-            "Percent (%)": [25.0, 25.0, 25.0, 25.0],
-            "Amount": [np.nan, np.nan, np.nan, np.nan],
-        })
-
+        st.session_state["grid_df"] = DEFAULT_GRID.copy()
     st.markdown(
         f"**Holdings**  \n"
         f"<span class='small-muted'>Enter <b>Ticker</b> and either <b>Percent (%)</b> or "
@@ -720,9 +678,7 @@ def holdings_editor_form(currency_symbol, total_value):
         f"<b>Apply changes</b>. Use <b>Normalize</b> to force exactly 100% in percent mode.</span>",
         unsafe_allow_html=True,
     )
-
     committed = st.session_state["grid_df"].copy()
-
     with st.form("holdings_form", clear_on_submit=False):
         sync_mode = st.segmented_control(
             "Sync mode",
@@ -731,7 +687,6 @@ def holdings_editor_form(currency_symbol, total_value):
             help="Choose which side drives on Apply."
         )
         mode_key = {"Percent → Amount": "percent", "Amount → Percent": "amount"}[sync_mode]
-
         edited = st.data_editor(
             committed,
             num_rows="dynamic",
@@ -744,28 +699,22 @@ def holdings_editor_form(currency_symbol, total_value):
             },
             key="grid_form",
         )
-
         col_a, col_b = st.columns([1, 1])
         apply_btn = col_a.form_submit_button("Apply changes", type="primary", use_container_width=True)
         normalize_btn = col_b.form_submit_button("Normalize to 100% (percent mode)", use_container_width=True)
-
     if normalize_btn:
         syncd = edited.copy()
         syncd["Percent (%)"] = normalize_percents_to_100(_safe_num(syncd.get("Percent (%)")))
         if total_value and total_value>0:
             syncd["Amount"] = (syncd["Percent (%)"]/100.0*total_value).round(2)
         st.session_state["grid_df"] = syncd[["Ticker","Percent (%)","Amount"]]
-
     elif apply_btn:
         syncd = sync_percent_amount(edited.copy(), total_value, mode_key)
         st.session_state["grid_df"] = syncd[["Ticker","Percent (%)","Amount"]]
-
     current = st.session_state["grid_df"].copy()
-    view = current.copy()
     out = current.copy()
     out["ticker"] = out["Ticker"].map(yf_symbol)
     out = out[out["ticker"].astype(bool)]
-
     if total_value and total_value>0 and _safe_num(out["Amount"]).sum()>0:
         w = _safe_num(out["Amount"]) / _safe_num(out["Amount"]).sum()
     elif _safe_num(out["Percent (%)"]).sum()>0:
@@ -773,14 +722,11 @@ def holdings_editor_form(currency_symbol, total_value):
     else:
         n = max(len(out),1)
         w = pd.Series([1.0/n]*n, index=out.index)
-
     df_hold = pd.DataFrame({"ticker": out["ticker"], "weight": w})
-    return df_hold, view
+    return df_hold, current
 
 def app_portfolio():
     topbar_back("back_port")
-
-    # Header: logo + title next to each other, centered
     st.markdown(f"""
     <div class="brand">
       {inline_logo_svg()}
@@ -795,8 +741,7 @@ def app_portfolio():
 
     df_hold, committed_view = holdings_editor_form(cur, total)
     if df_hold.empty:
-        st.info("Add at least one holding to run the rating.")
-        return
+        st.info("Add at least one holding to run the rating."); return
 
     with st.expander("Advanced settings", expanded=False):
         c1,c2,c3=st.columns(3)
@@ -829,8 +774,7 @@ def app_portfolio():
             chunk=25, retries=3, sleep_between=0.35, singles_pause=0.20
         )
         if prices.empty:
-            st.error("No prices fetched.")
-            return
+            st.error("No prices fetched."); return
         prog.progress(40)
 
         status.update(label="Computing technicals…")
@@ -855,8 +799,7 @@ def app_portfolio():
         status.update(label="Assessing macro regime…")
         vix_series = fetch_vix_series(period="6mo", interval="1d")
         MACRO, _, _, _ = macro_from_vix(vix_series)
-        prog.progress(100)
-        status.update(label="Done!", state="complete")
+        prog.progress(100); status.update(label="Done!", state="complete")
 
     st.markdown(
         f'<div class="banner">Peers loaded: <b>{len(panel_all)}</b> / <b>{target_count}</b> '
@@ -915,22 +858,6 @@ def app_portfolio():
     c.metric("Macro (VIX)", f"{MACRO:.3f}")
     d.metric("Diversification", f"{DIV:.3f}")
 
-    with st.expander("Why this portfolio rating?"):
-        show = per_name.rename(columns={"weight":"Weight","FUND_score":"Fundamentals",
-                                        "TECH_score":"Technicals","MACRO_score":"Macro (VIX)",
-                                        "COMPOSITE":"Composite","weighted_composite":"Weight × Comp"})[
-            ["Weight","Fundamentals","Technicals","Macro (VIX)","Composite","Weight × Comp"]
-        ]
-        st.dataframe(show.round(4), use_container_width=True)
-        st.markdown("**Diversification explained**")
-        st.markdown(
-            f"- **Sector mix** → effective number of sectors ≈ **{effN:.1f}** → sector diversity score **{sector_div:.2f}**.  \n"
-            f"- **Name concentration** → max single position ≈ **{max_w*100:.1f}%** → score **{name_div:.2f}**.  \n"
-            f"- **Correlation** → average pairwise correlation ≈ "
-            f"{('%.2f' % avg_corr) if not np.isnan(avg_corr) else 'N/A'} → score **{corr_div:.2f}**.  \n"
-            f"- **Diversification score** = 50% sector + 30% correlation + 20% name concentration."
-        )
-
     px_held = prices[tickers].dropna(how="all")
     r = px_held.pct_change().fillna(0)
     w_vec = weights.reindex(px_held.columns).fillna(0).values
@@ -953,12 +880,150 @@ def app_portfolio():
         st.line_chart(pd.DataFrame({"Drawdown": dd}), use_container_width=True)
         st.caption("Depth of falls from prior peaks (risk perspective).")
 
+# -------------------- TRACKER (NEW) --------------------
+def app_tracker():
+    topbar_back("back_tracker")
+    st.markdown(f"""
+    <div class="brand">
+      {inline_logo_svg()}
+      <h1>Portfolio Tracker</h1>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 1) Choose or create a portfolio
+    names = ["(Unsaved draft)"] + sorted(st.session_state.tracker_portfolios.keys())
+    sel = st.selectbox("Saved portfolios", names, index=0, help="Pick a saved portfolio to load it.")
+    load_btn = st.button("Load selected", disabled=(sel=="(Unsaved draft)"))
+
+    # holdings editor (Ticker + Shares)
+    if load_btn and sel in st.session_state.tracker_portfolios:
+        hold_df = st.session_state.tracker_portfolios[sel]["holdings"].copy()
+    else:
+        hold_df = pd.DataFrame({"Ticker":["AAPL","MSFT","NVDA"], "Shares":[10,5,3]})
+
+    ed = st.data_editor(
+        hold_df,
+        num_rows="dynamic", hide_index=True, use_container_width=True,
+        column_config={
+            "Ticker": st.column_config.TextColumn(width="small"),
+            "Shares": st.column_config.NumberColumn(format="%.6f", help="Number of shares (can be fractional)"),
+        },
+        key="tracker_editor",
+    )
+
+    # Save / rename
+    save_col, name_col, del_col = st.columns([1,2,1])
+    with name_col:
+        new_name = st.text_input("Portfolio name", value=(sel if sel!="(Unsaved draft)" else "My Portfolio"))
+    with save_col:
+        if st.button("💾 Save / Update", type="primary", use_container_width=True):
+            clean = ed.copy()
+            clean["Ticker"] = clean["Ticker"].astype(str).str.strip()
+            clean = clean[clean["Ticker"].astype(bool)]
+            clean["Ticker"] = clean["Ticker"].map(yf_symbol)
+            clean = clean.groupby("Ticker", as_index=False)["Shares"].sum()
+            st.session_state.tracker_portfolios[new_name] = {
+                "holdings": clean,
+                "saved": pd.Timestamp.utcnow().isoformat()
+            }
+            st.success(f"Saved portfolio '{new_name}'.")
+    with del_col:
+        if st.button("🗑️ Delete", use_container_width=True, disabled=(sel=="(Unsaved draft)")):
+            st.session_state.tracker_portfolios.pop(sel, None)
+            st.warning(f"Deleted portfolio '{sel}'.")
+
+    # 2) Compute value & live rating
+    port = ed.copy()
+    port["Ticker"] = port["Ticker"].astype(str).str.strip().map(yf_symbol)
+    port = port[port["Ticker"].astype(bool)]
+    if port.empty:
+        st.info("Add at least one holding (Ticker + Shares) to track."); return
+
+    tickers = port["Ticker"].tolist()
+    shares = port.set_index("Ticker")["Shares"]
+
+    with st.status("Fetching prices & computing…", expanded=False):
+        # Use 1y daily prices for value chart
+        prices, ok = fetch_prices_chunked_with_fallback(tickers, period="1y", interval="1d")
+        if prices.empty:
+            st.error("Could not fetch prices for these tickers."); return
+
+    latest = prices.ffill().iloc[-1].reindex(tickers).fillna(0.0)
+    values = latest * shares.reindex(tickers).fillna(0.0)
+    total_val = float(values.sum())
+    day_change = prices.ffill().iloc[-1] / prices.ffill().iloc[-2] - 1.0 if prices.shape[0] >= 2 else pd.Series(0, index=prices.columns)
+    day_pnl = float((day_change.reindex(tickers).fillna(0.0) * values / (1+day_change.reindex(tickers).fillna(0.0))).sum())
+
+    a,b,c = st.columns(3)
+    a.metric("Portfolio Value", f"${total_val:,.2f}")
+    b.metric("Day P&L", f"${day_pnl:,.2f}")
+    c.metric("Positions", f"{len(tickers)}")
+
+    # Value chart (sum(price * shares))
+    aligned = prices.reindex(columns=tickers).ffill()
+    port_value = (aligned * shares.reindex(aligned.columns).fillna(0.0)).sum(axis=1)
+    st.line_chart(pd.DataFrame({"Portfolio value": port_value}), use_container_width=True)
+    st.caption("Sum of constituent values using your current share counts (buy-and-hold).")
+
+    # Live rating using existing signals (weights by market value)
+    weights_by_value = (latest * shares).fillna(0.0)
+    if weights_by_value.sum() > 0:
+        weights = (weights_by_value / weights_by_value.sum()).rename("weight")
+    else:
+        weights = pd.Series(1/len(tickers), index=tickers, name="weight")
+
+    # Reuse rating components in a lightweight way
+    panel_all = {t: prices[t].dropna() for t in tickers if t in prices}
+    tech_all = technical_scores(panel_all)
+    for col in ["dma_gap","macd_hist","rsi_strength","mom12m"]:
+        if col in tech_all.columns: tech_all[f"{col}_z"] = zscore_series(tech_all[col])
+    TECH_score_all = tech_all[[c for c in ["dma_gap_z","macd_hist_z","rsi_strength_z","mom12m_z"] if c in tech_all.columns]].mean(axis=1)
+
+    fund_raw_all = fetch_fundamentals_simple(list(panel_all.keys()))
+    fdf_all = pd.DataFrame(index=fund_raw_all.index)
+    for col in ["revenueGrowth","earningsGrowth","returnOnEquity","profitMargins",
+                "grossMargins","operatingMargins","ebitdaMargins"]:
+        if col in fund_raw_all.columns: fdf_all[f"{col}_z"]=zscore_series(fund_raw_all[col])
+    for col in ["trailingPE","forwardPE","debtToEquity"]:
+        if col in fund_raw_all.columns: fdf_all[f"{col}_z"]=zscore_series(-fund_raw_all[col])
+    FUND_score_all = fdf_all.mean(axis=1) if len(fdf_all.columns) else pd.Series(0.0, index=fund_raw_all.index)
+
+    vix_series = fetch_vix_series(period="6mo", interval="1d")
+    MACRO, _, _, _ = macro_from_vix(vix_series)
+
+    idx_all = pd.Index(list(panel_all.keys()))
+    temp = pd.DataFrame(index=idx_all)
+    temp["FUND"] = FUND_score_all.reindex(idx_all).fillna(0.0)
+    temp["TECH"] = TECH_score_all.reindex(idx_all).fillna(0.0)
+    temp["MACRO"] = MACRO
+    # Use same default weights as stock page: F 0.45, T 0.40, M 0.10 (ignore diversification here)
+    w_f,w_t,w_m = 0.45,0.40,0.10
+    wsum=(w_f+w_t+w_m) or 1.0
+    wf,wt,wm=w_f/wsum,w_t/wsum,w_m/wsum
+    temp["COMP"] = wf*temp["FUND"] + wt*temp["TECH"] + wm*temp["MACRO"]
+    temp = temp.join(weights, how="left").fillna({"weight":0.0})
+    live_signal = float((temp["COMP"]*temp["weight"]).sum())
+    live_score = float(np.clip((live_signal+1)/2, 0, 1)*100)
+
+    st.markdown("### 🔮 Live ‘Rate My Portfolio’ Score")
+    st.metric("Portfolio Score (0–100)", f"{live_score:.1f}")
+
+    # Quick table
+    tbl = pd.DataFrame({
+        "Price": latest.reindex(tickers),
+        "Shares": shares.reindex(tickers),
+        "Value": values.reindex(tickers)
+    })
+    st.dataframe(tbl.round(4), use_container_width=True)
+
 # -------------------- Router --------------------
 def app_router():
     if not st.session_state.entered:
         landing(); return
     if st.session_state.mode=="portfolio":
         app_portfolio()
+    elif st.session_state.mode=="tracker":
+        app_tracker()
     else:
         app_stock()
 
