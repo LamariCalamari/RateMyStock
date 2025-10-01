@@ -1,17 +1,81 @@
-# app.py — Home page (styled title + centered boxes that actually contain the labels)
+# app.py — Home (stand-alone): no imports from app_utils, fixes sidebar "app" → "Home",
+# pretty gradient title + three centered boxed CTAs whose labels are INSIDE the boxes.
 
 import streamlit as st
-from app_utils import inject_css_and_script, brand_header
 
 st.set_page_config(page_title="Rate My", layout="wide")
 
-# global css + sidebar “Home” rename
-inject_css_and_script()
+# ---------- Inline CSS + Sidebar label rename script ----------
+st.markdown(
+    """
+    <style>
+    .block-container{max-width:1140px;}
 
-# Brand header (logo sits next to title and is centered)
+    /* Brand header */
+    .brand{ display:flex; align-items:center; justify-content:center; gap:16px; margin:1.0rem 0 .25rem; }
+    .logo{ width:56px; height:52px; flex:0 0 auto; }
+    .brand h1{
+      font-size:56px;margin:0;line-height:1;font-weight:900;letter-spacing:.3px;
+      background:linear-gradient(90deg,#e74c3c 0%,#f39c12 50%,#2ecc71 100%);
+      -webkit-background-clip:text;background-clip:text;color:transparent;
+    }
+
+    /* CTA boxes row */
+    .cta{ padding:.25rem; filter:drop-shadow(0 10px 18px rgba(0,0,0,.35)); }
+    .cta .stButton>button{
+      width:100%; padding:18px 22px; border-radius:14px; font-weight:800; font-size:1.05rem;
+      border:1px solid rgba(255,255,255,.14);
+      background:linear-gradient(90deg,#e85d58, #f39c12, #2ecc71);
+      color:#0e1015; box-shadow:0 1px 0 rgba(255,255,255,.06) inset;
+      transition:transform .08s ease, box-shadow .16s ease, filter .12s ease;
+    }
+    .cta.dark .stButton>button{
+      background:#171a1f; color:#e6e8eb; border-color:#2e3339;
+    }
+    .cta .stButton>button:hover{ transform:translateY(-1px); filter:saturate(1.06) brightness(1.05); }
+    .cta.dark .stButton>button:hover{ border-color:#3a3f46; }
+
+    /* nicer horizontal rule */
+    .hr-lite{height:1px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.08),transparent);border:0;margin:18px 0;}
+    </style>
+
+    <script>
+    (function(){
+      // Robustly rename the first sidebar nav item from "app" to "Home"
+      function renameFirst(){
+        try{
+          const nav = document.querySelector('[data-testid="stSidebarNav"]');
+          if(!nav) return;
+          const first = nav.querySelector('ul li:first-child a p');
+          if(first && first.textContent.trim().toLowerCase()==='app'){ first.textContent = 'Home'; }
+        }catch(e){}
+      }
+      const obs = new MutationObserver(renameFirst);
+      obs.observe(document.body,{childList:true,subtree:true});
+      renameFirst();
+    })();
+    </script>
+    """,
+    unsafe_allow_html=True,
+)
+
+def inline_logo_svg() -> str:
+    return """<svg class="logo" viewBox="0 0 100 90" xmlns="http://www.w3.org/2000/svg" aria-label="Rate My">
+  <defs>
+    <linearGradient id="g" x1="0" x2="0" y1="1" y2="0">
+      <stop offset="0%"  stop-color="#e74c3c"/>
+      <stop offset="50%" stop-color="#f39c12"/>
+      <stop offset="100%" stop-color="#2ecc71"/>
+    </linearGradient>
+  </defs>
+  <polygon points="50,5 95,85 5,85" fill="url(#g)"/>
+</svg>"""
+
+def brand_header(title: str):
+    st.markdown(f'<div class="brand">{inline_logo_svg()}<h1>{title}</h1></div>', unsafe_allow_html=True)
+
+# ---------- Header ----------
 brand_header("Rate My")
-
-# Tagline
 st.markdown(
     "<div style='text-align:center;color:#9aa0a6;font-size:1.15rem;margin:.1rem 0 1.2rem;'>"
     "Pick a stock or your entire portfolio — we’ll rate it with clear, friendly explanations and charts."
@@ -19,7 +83,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ----- Centered CTA row: each label is inside the gradient box -----
+# ---------- Centered boxed CTAs (labels are inside the boxes) ----------
 c1, c2, c3 = st.columns([1,1,1], gap="large")
 
 with c1:
@@ -40,9 +104,9 @@ with c3:
         st.switch_page("pages/3_Portfolio_Tracker.py")
     st.markdown('</div>', unsafe_allow_html=True)
 
-# Helpful note
+# ---------- Footer hint ----------
+st.markdown("<div class='hr-lite'></div>", unsafe_allow_html=True)
 st.markdown(
-    "<hr style='opacity:.08'>"
     "<div style='text-align:center;color:#9aa0a6;'>Your portfolios are saved to a local SQLite DB when signed in.</div>",
     unsafe_allow_html=True,
 )
