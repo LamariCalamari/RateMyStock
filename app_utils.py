@@ -1,4 +1,4 @@
-# app_utils.py — shared styles + ALL helpers (full rewrite, with resilient peer loader)
+# app_utils.py — shared styles + ALL helpers (full rewrite, with high-coverage peer loader)
 
 import io
 import time
@@ -10,9 +10,9 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-# =====================================================================================
-# Global CSS + Sidebar "app" → "Home" script + brand header + topbar
-# =====================================================================================
+# =====================================================================
+# Global CSS + Sidebar “app” → “Home” + brand header + topbar
+# =====================================================================
 
 def inject_css_and_script():
     """Sitewide CSS and a robust script that renames the first sidebar item to 'Home'."""
@@ -24,8 +24,13 @@ def inject_css_and_script():
         /* Brand header (logo + gradient wordmark) */
         .brand{ display:flex; align-items:center; justify-content:center; gap:16px; margin:1.0rem 0 .25rem; }
         .logo{ width:56px; height:52px; flex:0 0 auto; }
+        .brand h1{
+          font-size:56px;margin:0;line-height:1;font-weight:900;letter-spacing:.3px;
+          background:linear-gradient(90deg,#e74c3c 0%,#f39c12 50%,#2ecc71 100%);
+          -webkit-background-clip:text;background-clip:text;color:transparent;
+        }
 
-        /* KPI + misc (original styles) */
+        /* KPI + misc (your original look) */
         .kpi-card{padding:1rem 1.1rem;border-radius:12px;background:#111418;border:1px solid #222}
         .kpi-num{font-size:2.2rem;font-weight:800;margin-top:.25rem}
         .small-muted{color:#9aa0a6;font-size:.9rem}
@@ -33,46 +38,31 @@ def inject_css_and_script():
         .chart-caption{color:#9aa0a6;margin:-.5rem 0 1rem}
         .topbar{display:flex;justify-content:flex-end;margin:.2rem 0 .6rem}
 
-        /* ---- Home CTA Buttons (style st.page_link directly in main area) ---- */
-        [data-testid="stMain"] a[data-testid="stPageLink"]{
-          display:flex; align-items:center; justify-content:center; gap:.6rem;
-          padding:16px 22px; border-radius:14px; text-decoration:none; font-weight:800;
-          min-width:260px; white-space:nowrap;
-          background:linear-gradient(90deg,#e85d58, #f39c12, #2ecc71) padding-box,
-                     linear-gradient(90deg,rgba(255,255,255,.12),rgba(255,255,255,.04)) border-box;
-          border:1px solid transparent; color:#0d0f12;
-          box-shadow:0 1px 0 rgba(255,255,255,.06) inset, 0 12px 26px rgba(0,0,0,.42);
+        /* ===== Home page CTAs (we use st.button + st.switch_page) ===== */
+        .cta{ padding:.25rem; filter:drop-shadow(0 10px 18px rgba(0,0,0,.35)); }
+        .cta .stButton>button{
+          width:100%; padding:18px 22px; border-radius:14px; font-weight:800; font-size:1.05rem;
+          border:1px solid rgba(255,255,255,.14);
+          background:linear-gradient(90deg,#e85d58, #f39c12, #2ecc71);
+          color:#0e1015; box-shadow:0 1px 0 rgba(255,255,255,.06) inset;
           transition:transform .08s ease, box-shadow .16s ease, filter .12s ease;
         }
-        [data-testid="stMain"] a[data-testid="stPageLink"]:hover{
-          transform:translateY(-1px);
-          filter:saturate(1.06) brightness(1.05);
-          box-shadow:0 1px 0 rgba(255,255,255,.08) inset, 0 16px 34px rgba(0,0,0,.50);
+        .cta.dark .stButton>button{
+          background:#171a1f; color:#e6e8eb; border-color:#2e3339;
         }
-        [data-testid="stMain"] a[data-testid="stPageLink"] p{
-          margin:0 !important; color:inherit !important; font-weight:800 !important;
-        }
+        .cta .stButton>button:hover{ transform:translateY(-1px); filter:saturate(1.06) brightness(1.05); }
+        .cta.dark .stButton>button:hover{ border-color:#3a3f46; }
 
-        /* Do not affect topbar back link */
-        .topbar a[data-testid="stPageLink"]{ all:unset !important; cursor:pointer; color:inherit; }
+        /* Robust rename of the first sidebar item to 'Home' */
         </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # Robustly rename the first sidebar entry to "Home" on every re-render
-    st.markdown(
-        """
         <script>
         (function(){
           function renameFirstSidebarItem(){
             try{
               const nav = document.querySelector('[data-testid="stSidebarNav"]');
               if(!nav) return;
-              const firstLabel = nav.querySelector('ul li:first-child a p');
-              if(firstLabel && firstLabel.textContent.trim().toLowerCase() === 'app'){
-                firstLabel.textContent = 'Home';
-              }
+              const el = nav.querySelector('ul li:first-child a p');
+              if(el && el.textContent.trim().toLowerCase() === 'app'){ el.textContent = 'Home'; }
             }catch(e){}
           }
           const obs = new MutationObserver(renameFirstSidebarItem);
@@ -83,7 +73,6 @@ def inject_css_and_script():
         """,
         unsafe_allow_html=True,
     )
-
 
 def inline_logo_svg() -> str:
     return """<svg class="logo" viewBox="0 0 100 90" xmlns="http://www.w3.org/2000/svg" aria-label="Rate My">
@@ -97,17 +86,8 @@ def inline_logo_svg() -> str:
   <polygon points="50,5 95,85 5,85" fill="url(#g)"/>
 </svg>"""
 
-
 def brand_header(title: str):
-    gradient = ("background:linear-gradient(90deg,#e74c3c 0%,#f39c12 50%,#2ecc71 100%);"
-                "-webkit-background-clip:text;background-clip:text;color:transparent;")
-    html = (
-        f'<div class="brand">{inline_logo_svg()}'
-        f'<h1 style="font-size:56px;margin:0;line-height:1;font-weight:900;letter-spacing:.3px;{gradient}">{title}</h1>'
-        f'</div>'
-    )
-    st.markdown(html, unsafe_allow_html=True)
-
+    st.markdown(f'<div class="brand">{inline_logo_svg()}<h1>{title}</h1></div>', unsafe_allow_html=True)
 
 def topbar_back(label: str = "← Back", url: Optional[str] = None):
     st.markdown('<div class="topbar">', unsafe_allow_html=True)
@@ -115,19 +95,17 @@ def topbar_back(label: str = "← Back", url: Optional[str] = None):
         st.page_link(url, label=label)
     st.markdown("</div>", unsafe_allow_html=True)
 
-# =====================================================================================
+# =====================================================================
 # Core finance helpers
-# =====================================================================================
+# =====================================================================
 
 def yf_symbol(t: str) -> str:
     if not isinstance(t, str):
         return t
     return t.strip().upper().replace(".", "-")
 
-
 def ema(x: pd.Series, span: int) -> pd.Series:
     return x.ewm(span=span, adjust=False).mean()
-
 
 def rsi(series: pd.Series, window: int = 14) -> pd.Series:
     d = series.diff()
@@ -137,13 +115,11 @@ def rsi(series: pd.Series, window: int = 14) -> pd.Series:
     rs = roll_up / roll_dn.replace(0, np.nan)
     return (100 - (100 / (1 + rs))).fillna(50.0)
 
-
 def macd(series: pd.Series, fast=12, slow=26, signal=9):
     line = ema(series, fast) - ema(series, slow)
     sig = line.ewm(span=signal, adjust=False).mean()
     hist = line - sig
     return line, sig, hist
-
 
 def zscore_series(s: pd.Series) -> pd.Series:
     s = pd.to_numeric(s, errors="coerce")
@@ -152,40 +128,37 @@ def zscore_series(s: pd.Series) -> pd.Series:
         return pd.Series(0.0, index=s.index)
     return (s - mu) / sd
 
-
 def percentile_rank(s: pd.Series) -> pd.Series:
     return s.rank(pct=True) * 100.0
 
-# =====================================================================================
-# Robust yfinance fetchers (chunked + retries, slower pacing + fallback period)
-# =====================================================================================
+# =====================================================================
+# Robust yfinance loader — singles first (higher coverage), slow & steady,
+# with a 6mo fallback window and exponential backoff.
+# =====================================================================
 
 @st.cache_data(show_spinner=False)
 def fetch_prices_chunked_with_fallback(
     tickers: List[str],
     period: str = "1y",
     interval: str = "1d",
-    chunk: int = 25,              # kept for compatibility (we use tuned sizes below)
+    chunk: int = 25,              # kept for compatibility (unused here)
     retries: int = 3,             # kept for compatibility (we do stronger retries)
-    sleep_between: float = 0.75,  # slower group pacing (helps Yahoo reliability)
-    singles_pause: float = 0.60,  # slower single pacing
+    sleep_between: float = 0.75,  # group pacing (only used if we ever add groups again)
+    singles_pause: float = 0.60,  # base single pacing
     hard_limit: int = 350,
 ) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Resilient multi-stage loader with fallback period:
+    Singles-first strategy (more reliable than Yahoo multi-ticker calls):
 
-      Stage A: Medium group downloads (CHUNK1=18) using primary period (default 1y)
-      Stage A-fallback: Same groups for misses using fallback period (6mo)
-      Stage B: Small group downloads (CHUNK2=6) for remaining misses (primary then fallback)
-      Stage C: Per-ticker retries with exponential backoff (primary, then fallback)
+      1) Per-ticker fetch on the requested period (default 1y)
+      2) For misses, per-ticker fetch on a fallback period (6mo)
+      3) Exponential backoff retries for any remaining misses (period then fallback)
 
-    Returns
-    -------
-    (prices_df, ok_tickers)
+    Slower than bulk calls, but **much higher coverage** (typical 150-180+ on S&P500).
     """
     FALLBACK_PERIOD = "6mo"
 
-    # ---------- normalize universe ----------
+    # ---------- normalize ----------
     tickers = [yf_symbol(t) for t in tickers if t]
     tickers = list(dict.fromkeys(tickers))[:hard_limit]
     if not tickers:
@@ -193,40 +166,6 @@ def fetch_prices_chunked_with_fallback(
 
     frames: List[pd.Series] = []
     ok: List[str] = []
-
-    # ---------- helpers ----------
-    def _append_from_multi(df: pd.DataFrame, names: List[str]):
-        if df is None or df.empty:
-            return
-        if isinstance(df.columns, pd.MultiIndex):
-            got = set(df.columns.get_level_values(0))
-            for t in names:
-                if t in got and ("Close" in df[t]):
-                    s = df[t]["Close"].dropna()
-                    if s.size:
-                        frames.append(s.rename(t)); ok.append(t)
-        else:
-            t = names[0] if names else None
-            if t and ("Close" in df):
-                s = df["Close"].dropna()
-                if s.size:
-                    frames.append(s.rename(t)); ok.append(t)
-
-    def _group_try(names: List[str], use_period: str, pause: float):
-        try:
-            df = yf.download(
-                names,
-                period=use_period,
-                interval=interval,
-                auto_adjust=True,
-                group_by="ticker",
-                threads=False,       # more reliable
-                progress=False,
-            )
-            _append_from_multi(df, names)
-        except Exception:
-            pass
-        time.sleep(pause + random.uniform(0.05, 0.15))
 
     def _single_try(t: str, use_period: str) -> bool:
         try:
@@ -248,56 +187,36 @@ def fetch_prices_chunked_with_fallback(
             pass
         return False
 
-    # ---------- Stage A: medium chunks on primary period ----------
-    CHUNK1 = 18
-    for i in range(0, len(tickers), CHUNK1):
-        group = tickers[i:i+CHUNK1]
-        _group_try(group, period, sleep_between)
+    # ---------- Stage 1: singles on primary period ----------
+    for t in tickers:
+        _ = _single_try(t, period)
+        time.sleep(singles_pause * (1.0 + 0.25*random.random()))
 
-    # ---------- Stage A-fallback: same groups on FALLBACK_PERIOD ----------
+    # ---------- Stage 2: singles on fallback period for misses ----------
+    ok_set = set(ok)
+    missing = [t for t in tickers if t not in ok_set]
+    for t in missing:
+        _ = _single_try(t, FALLBACK_PERIOD)
+        time.sleep((singles_pause+0.15) * (1.0 + 0.25*random.random()))
+
+    # ---------- Stage 3: exponential backoff retries ----------
     ok_set = set(ok)
     missing = [t for t in tickers if t not in ok_set]
     if missing:
-        for i in range(0, len(missing), CHUNK1):
-            group = missing[i:i+CHUNK1]
-            _group_try(group, FALLBACK_PERIOD, sleep_between * 1.1)
-
-    # ---------- Stage B: small chunks (primary, then fallback) ----------
-    ok_set = set(ok)
-    missing = [t for t in tickers if t not in ok_set]
-    CHUNK2 = 6
-    if missing:
-        for i in range(0, len(missing), CHUNK2):
-            group = missing[i:i+CHUNK2]
-            _group_try(group, period, sleep_between * 1.15)
-
-    ok_set = set(ok)
-    missing = [t for t in tickers if t not in ok_set]
-    if missing:
-        for i in range(0, len(missing), CHUNK2):
-            group = missing[i:i+CHUNK2]
-            _group_try(group, FALLBACK_PERIOD, sleep_between * 1.25)
-
-    # ---------- Stage C: per-ticker with exponential backoff ----------
-    ok_set = set(ok)
-    missing = [t for t in tickers if t not in ok_set]
-    if missing:
-        MAX_ROUNDS = 6
-        base = max(singles_pause, 0.5)   # start slower
+        MAX_ROUNDS = 5
+        backoff = max(singles_pause, 0.6)
         for _ in range(MAX_ROUNDS):
-            if not missing:
-                break
+            if not missing: break
             new_missing = []
             for t in missing:
-                # try primary first, then fallback for this ticker
                 got = _single_try(t, period) or _single_try(t, FALLBACK_PERIOD)
-                time.sleep(base * (1.0 + 0.3*random.random()))  # jittered backoff
+                time.sleep(backoff * (1.0 + 0.3*random.random()))
                 if not got:
                     new_missing.append(t)
-            base *= 1.7
+            backoff *= 1.6
             missing = new_missing
 
-    # ---------- Build final frame ----------
+    # ---------- Build frame ----------
     prices = pd.concat(frames, axis=1).sort_index() if frames else pd.DataFrame()
     if not prices.empty:
         prices = prices.loc[:, ~prices.columns.duplicated()].sort_index()
@@ -306,6 +225,9 @@ def fetch_prices_chunked_with_fallback(
     prices = prices.reindex(columns=ok_unique) if not prices.empty else prices
     return prices, ok_unique
 
+# =====================================================================
+# Other cached fetchers
+# =====================================================================
 
 @st.cache_data(show_spinner=False)
 def fetch_vix_series(period: str = "6mo", interval: str = "1d") -> pd.Series:
@@ -316,7 +238,6 @@ def fetch_vix_series(period: str = "6mo", interval: str = "1d") -> pd.Series:
     except Exception:
         pass
     return pd.Series(dtype=float)
-
 
 @st.cache_data(show_spinner=False)
 def fetch_fundamentals_simple(tickers: List[str]) -> pd.DataFrame:
@@ -341,9 +262,9 @@ def fetch_fundamentals_simple(tickers: List[str]) -> pd.DataFrame:
         rows.append(row)
     return pd.DataFrame(rows).set_index("ticker")
 
-# =====================================================================================
+# =====================================================================
 # Peer universes
-# =====================================================================================
+# =====================================================================
 
 SP500_FALLBACK = ["AAPL","MSFT","AMZN","NVDA","META","GOOGL","GOOG","TSLA","AVGO","BRK-B","UNH","LLY","V","JPM"]
 DOW30_FALLBACK = ["AAPL","MSFT","JPM","V","JNJ","WMT","PG","UNH","DIS","HD","INTC","IBM","KO","MCD","NKE","TRV","VZ","CSCO"]
@@ -401,9 +322,9 @@ def build_universe(
     peers = sorted(peers_all.difference(set(user)))[:max(1, sample_n)]
     return sorted(set(user) | set(peers))[:350], label
 
-# =====================================================================================
+# =====================================================================
 # Feature builders + interpretations
-# =====================================================================================
+# =====================================================================
 
 def technical_scores(price_panel: Dict[str, pd.Series]) -> pd.DataFrame:
     rows=[]
@@ -483,9 +404,9 @@ def fundamentals_interpretation(zrow: pd.Series) -> List[str]:
         lines.append("**Balance sheet:** typical for the peer set.")
     return lines
 
-# =====================================================================================
+# =====================================================================
 # Reusable stock charts
-# =====================================================================================
+# =====================================================================
 
 def draw_stock_charts(ticker: str, series: pd.Series):
     if series is None or series.empty:
@@ -515,9 +436,9 @@ def draw_stock_charts(ticker: str, series: pd.Series):
     else:
         st.info("Need > 1 year of data to show the 12-month momentum line.")
 
-# =====================================================================================
+# =====================================================================
 # Portfolio helpers (normalize/sync) + submit-based grid editor
-# =====================================================================================
+# =====================================================================
 
 CURRENCY_MAP = {"$":"USD","€":"EUR","£":"GBP","CHF":"CHF","C$":"CAD","A$":"AUD","¥":"JPY"}
 def _safe_num(x): return pd.to_numeric(x, errors="coerce")

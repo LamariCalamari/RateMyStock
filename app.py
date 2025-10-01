@@ -1,46 +1,48 @@
-# app.py — Home / landing
+# app.py — Home page (styled title + centered boxes that actually contain the labels)
+
 import streamlit as st
-from app_utils import inject_css, brand_header
+from app_utils import inject_css_and_script, brand_header
 
-st.set_page_config(page_title="Home — Rate My", layout="wide")
-inject_css()
+st.set_page_config(page_title="Rate My", layout="wide")
 
-# ---------- Sidebar ----------
-with st.sidebar:
-    # Our own pill (since the built-in 'app' pill can't be renamed)
-    st.markdown('<div class="pill pill-home">Home</div>', unsafe_allow_html=True)
+# global css + sidebar “Home” rename
+inject_css_and_script()
 
-    st.header("Home")
-    st.info("Sign up / Log in is in the **Portfolio Tracker** page sidebar.")
-
-# ---------- Hero ----------
+# Brand header (logo sits next to title and is centered)
 brand_header("Rate My")
 
+# Tagline
 st.markdown(
-    "<p style='text-align:center;color:#a8b0b8;font-size:1.06rem;margin:.35rem 0 1.2rem'>"
+    "<div style='text-align:center;color:#9aa0a6;font-size:1.15rem;margin:.1rem 0 1.2rem;'>"
     "Pick a stock or your entire portfolio — we’ll rate it with clear, friendly explanations and charts."
-    "</p>",
+    "</div>",
     unsafe_allow_html=True,
 )
 
-# ---------- Centered CTAs (boxed, full labels visible) ----------
-# Wider middle columns so long labels don't truncate
-left, c1, c2, c3, right = st.columns([1, 1.3, 1.3, 1.3, 1], gap="large")
+# ----- Centered CTA row: each label is inside the gradient box -----
+c1, c2, c3 = st.columns([1,1,1], gap="large")
 
 with c1:
-    st.markdown('<div class="cta-box primary">', unsafe_allow_html=True)
-    st.page_link("pages/1_Rate_My_Stock.py", label="📈 Rate My Stock")
-    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown('<div class="cta">', unsafe_allow_html=True)
+    if st.button("📈  Rate My Stock", use_container_width=True, key="cta_stock"):
+        st.switch_page("pages/1_Rate_My_Stock.py")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 with c2:
-    st.markdown('<div class="cta-box">', unsafe_allow_html=True)
-    st.page_link("pages/2_Rate_My_Portfolio.py", label="💼 Rate My Portfolio")
-    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown('<div class="cta dark">', unsafe_allow_html=True)
+    if st.button("💼  Rate My Portfolio", use_container_width=True, key="cta_portfolio"):
+        st.switch_page("pages/2_Rate_My_Portfolio.py")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 with c3:
-    st.markdown('<div class="cta-box">', unsafe_allow_html=True)
-    st.page_link("pages/3_Portfolio_Tracker.py", label="📊 Portfolio Tracker")
-    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown('<div class="cta dark">', unsafe_allow_html=True)
+    if st.button("📊  Portfolio Tracker", use_container_width=True, key="cta_tracker"):
+        st.switch_page("pages/3_Portfolio_Tracker.py")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-st.divider()
-st.caption("Your portfolios are saved to a local SQLite DB when signed in.")
+# Helpful note
+st.markdown(
+    "<hr style='opacity:.08'>"
+    "<div style='text-align:center;color:#9aa0a6;'>Your portfolios are saved to a local SQLite DB when signed in.</div>",
+    unsafe_allow_html=True,
+)
