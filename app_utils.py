@@ -1,7 +1,6 @@
 # app_utils.py — shared utilities for Rate My (Stock + Portfolio + Tracker)
-# First run: fetches SP500, NASDAQ100, DOW30 from Wikipedia, normalizes,
-# then writes peer_lists_snapshot.json so future runs use a STATIC snapshot.
-# If you prefer fully hard-coded arrays later, just open that JSON and paste.
+# Uses static index lists from indices.py if available; otherwise falls back to local snapshot/web fallbacks.
+# Peer loader is strengthened to improve coverage (singles → bulk → Ticker.history).
 
 import io
 import os
@@ -134,32 +133,77 @@ def zscore_series(s: pd.Series) -> pd.Series:
 def percentile_rank(s: pd.Series) -> pd.Series:
     return s.rank(pct=True) * 100.0
 
-# ==========================  Peer lists (snapshot on first run) ==========================
+# ==========================  Index lists: from indices.py if present ==========================
 
-_SNAPSHOT_FILE = os.path.join(os.path.dirname(__file__), "peer_lists_snapshot.json")
+# If you paste full arrays in indices.py, we’ll use them. Otherwise we fall back to snapshot/fallbacks.
+try:
+    from indices import SP500_LIST as _SP500, NASDAQ100_LIST as _NDX, DOW30_LIST as _DOW
+except Exception:
+    _SP500, _NDX, _DOW = [], [], []
 
 def _normalize_list(tickers: Iterable[str]) -> List[str]:
     cleaned = []
+    seen = set()
     for s in tickers:
         if not isinstance(s, str): continue
         s = s.strip().upper().replace(".", "-")
-        if s: cleaned.append(s)
-    # dedupe keep order
-    seen = set(); out=[]
-    for t in cleaned:
-        if t not in seen:
-            seen.add(t); out.append(t)
-    return out
+        if s and s not in seen:
+            seen.add(s)
+            cleaned.append(s)
+    return cleaned
 
+_SNAPSHOT_FILE = os.path.join(os.path.dirname(__file__), "peer_lists_snapshot.json")
+
+@st.cache_resource(show_spinner=False)
+def _load_or_snapshot_peer_lists() -> Dict[str, List[str]]:
+    # 1) indices.py wins if provided
+    if _SP500 or _NDX or _DOW:
+        return {
+            "S&P 500": _normalize_list(_SP500),
+            "NASDAQ 100": _normalize_list(_NDX),
+            "Dow 30": _normalize_list(_DOW),
+        }
+
+    # 2) else try local snapshot
+    if os.path.exists(_SNAPSHOT_FILE):
+        try:
+            with open(_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
+                obj = json.load(f)
+            for k in obj:
+                obj[k] = _normalize_list(obj[k])
+            return obj
+        except Exception:
+            pass
+
+    # 3) else try a one-time fetch (Wikipedia) -> snapshot.
+    try:
+        sp500 = _fetch_sp500_from_web()
+        ndx   = _fetch_nasdaq100_from_web()
+        dow   = _fetch_dow30_from_web()
+        snap = {"S&P 500": sp500, "NASDAQ 100": ndx, "Dow 30": dow}
+        try:
+            with open(_SNAPSHOT_FILE, "w", encoding="utf-8") as f:
+                json.dump(snap, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        return snap
+    except Exception:
+        # 4) emergency minimal fallback
+        return {
+            "S&P 500": ["AAPL","MSFT","AMZN","NVDA","META","GOOGL","GOOG","BRK-B","LLY","JPM","V","AVGO","TSLA"],
+            "NASDAQ 100": ["AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","AVGO","TSLA","COST","PEP","ADBE","NFLX","AMD"],
+            "Dow 30": ["AAPL","MSFT","AMZN","AXP","BA","CAT","CRM","CSCO","CVX","DIS","GS","HD","HON","IBM","INTC",
+                       "JNJ","JPM","KO","MCD","MMM","MRK","MS","NKE","PG","TRV","UNH","V","VZ","WMT","DOW"],
+        }
+
+# Optional web fetchers (used only if no indices.py and no snapshot)
 def _fetch_sp500_from_web() -> List[str]:
-    # Wikipedia: List of S&P 500 companies
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     tables = pd.read_html(url, flavor="lxml")
     df = tables[0]
     return _normalize_list(df["Symbol"].tolist())
 
 def _fetch_nasdaq100_from_web() -> List[str]:
-    # Wikipedia: Nasdaq-100 (the constituents table)
     url = "https://en.wikipedia.org/wiki/Nasdaq-100"
     tables = pd.read_html(url, flavor="lxml")
     df = None
@@ -175,7 +219,6 @@ def _fetch_nasdaq100_from_web() -> List[str]:
     return _normalize_list(df.iloc[:,0].tolist())
 
 def _fetch_dow30_from_web() -> List[str]:
-    # Wikipedia: Dow Jones Industrial Average components
     url = "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average"
     tables = pd.read_html(url, flavor="lxml")
     df = None
@@ -192,70 +235,34 @@ def _fetch_dow30_from_web() -> List[str]:
         return _normalize_list(df.iloc[:,0].tolist())
     return _normalize_list(df[col].tolist())
 
-@st.cache_resource(show_spinner=False)
-def _load_or_snapshot_peer_lists() -> Dict[str, List[str]]:
-    """Load static lists from JSON or fetch once and persist to JSON."""
-    if os.path.exists(_SNAPSHOT_FILE):
-        try:
-            with open(_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
-                obj = json.load(f)
-            # normalize again to be safe
-            for k in obj:
-                obj[k] = _normalize_list(obj[k])
-            return obj
-        except Exception:
-            pass  # fall through to rebuild
-
-    # First run: fetch from web, normalize, persist
-    try:
-        sp500 = _fetch_sp500_from_web()
-        ndx   = _fetch_nasdaq100_from_web()
-        dow   = _fetch_dow30_from_web()
-        snap = {"S&P 500": sp500, "NASDAQ 100": ndx, "Dow 30": dow}
-        try:
-            with open(_SNAPSHOT_FILE, "w", encoding="utf-8") as f:
-                json.dump(snap, f, ensure_ascii=False, indent=2)
-        except Exception:
-            # if writing fails (read-only), still return in-memory lists
-            pass
-        return snap
-    except Exception:
-        # Emergency minimal fallbacks so the app still runs
-        return {
-            "S&P 500": ["AAPL","MSFT","AMZN","NVDA","META","GOOGL","GOOG","BRK-B","LLY","JPM","V","AVGO","TSLA"],
-            "NASDAQ 100": ["AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","AVGO","TSLA","COST","PEP","ADBE","NFLX","AMD"],
-            "Dow 30": ["AAPL","MSFT","AMZN","AXP","BA","CAT","CRM","CSCO","CVX","DIS","GS","HD","HON","IBM","INTC","JNJ","JPM","KO","MCD","MMM","MRK","MS","NKE","PG","TRV","UNH","V","VZ","WMT","DOW"],
-        }
-
-# Exposed catalog used by build_universe()
 PEER_CATALOG: Dict[str, List[str]] = _load_or_snapshot_peer_lists()
 
 def set_peer_catalog(sp500: List[str] | None = None,
                      ndx: List[str] | None = None,
                      dow: List[str] | None = None) -> None:
-    """Optional hook to override lists at runtime (e.g., from a local CSV)."""
+    """Optional runtime override."""
     if sp500 is not None: PEER_CATALOG["S&P 500"] = _normalize_list(sp500)
     if ndx is not None:   PEER_CATALOG["NASDAQ 100"] = _normalize_list(ndx)
     if dow is not None:   PEER_CATALOG["Dow 30"] = _normalize_list(dow)
 
-# ==========================  Data fetchers  ==========================
+# ==========================  Data fetchers (stronger)  ==========================
 
 @st.cache_data(show_spinner=False)
 def fetch_prices_chunked_with_fallback(
     tickers: Iterable[str],
     period: str = "1y",
     interval: str = "1d",
-    chunk: int = 25,
-    retries: int = 3,
-    sleep_between: float = 0.75,
-    singles_pause: float = 0.60,
-    hard_limit: int = 700,   # allow very large universes
+    chunk: int = 20,          # slightly smaller bulks; more reliable
+    retries: int = 4,         # extra tries
+    sleep_between: float = 1.0,
+    singles_pause: float = 1.1,
+    hard_limit: int = 700,
 ) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Robust fetcher for MANY symbols.
-      - Pass 1: singles (reliable)
-      - Pass 2: bulk for stragglers
-    Tuned delays to be gentler on yfinance for 150–300 names.
+    3-pass loader to maximize coverage:
+      1) Singles (most reliable)
+      2) Bulk for stragglers (faster)
+      3) Ticker.history() fallback for any remaining
     """
     names = [yf_symbol(t) for t in tickers if t]
     names = list(dict.fromkeys(names))[:hard_limit]
@@ -265,7 +272,7 @@ def fetch_prices_chunked_with_fallback(
     frames: List[pd.Series] = []
     ok: List[str] = []
 
-    # Pass 1 — singles with retries
+    # -------- Pass 1: singles with retries --------
     missing = names[:]
     for _ in range(retries):
         new_missing = []
@@ -292,7 +299,7 @@ def fetch_prices_chunked_with_fallback(
         if not missing:
             break
 
-    # Pass 2 — bulk for the rest
+    # -------- Pass 2: bulk groups --------
     def _append_from_multi(df: pd.DataFrame, group: List[str]):
         if not isinstance(df.columns, pd.MultiIndex):
             t = group[0]
@@ -308,18 +315,34 @@ def fetch_prices_chunked_with_fallback(
                 if s.size > 0:
                     frames.append(s.rename(t)); ok.append(t)
 
-    for i in range(0, len(missing), chunk):
-        group = missing[i:i+chunk]
-        try:
-            df = yf.download(
-                group, period=period, interval=interval,
-                auto_adjust=True, group_by="ticker",
-                threads=False, progress=False
-            )
-            _append_from_multi(df, group)
-        except Exception:
-            pass
-        time.sleep(sleep_between + random.uniform(0, 0.20))
+    if missing:
+        for i in range(0, len(missing), chunk):
+            group = missing[i:i+chunk]
+            try:
+                df = yf.download(
+                    group, period=period, interval=interval,
+                    auto_adjust=True, group_by="ticker",
+                    threads=False, progress=False
+                )
+                _append_from_multi(df, group)
+            except Exception:
+                pass
+            time.sleep(sleep_between + random.uniform(0, 0.25))
+        # recompute missing after pass 2
+        ok_set = set(ok)
+        missing = [t for t in names if t not in ok_set]
+
+    # -------- Pass 3: Ticker.history() fallback --------
+    if missing:
+        for t in missing:
+            try:
+                h = yf.Ticker(t).history(period=period, interval=interval, auto_adjust=True)
+                if isinstance(h, pd.DataFrame) and "Close" in h and not h["Close"].dropna().empty:
+                    frames.append(h["Close"].dropna().rename(t))
+                    ok.append(t)
+            except Exception:
+                pass
+            time.sleep(singles_pause + random.uniform(0.1, 0.35))
 
     prices = pd.concat(frames, axis=1).sort_index() if frames else pd.DataFrame()
     if not prices.empty:
@@ -358,16 +381,15 @@ def fetch_fundamentals_simple(tickers: Iterable[str]) -> pd.DataFrame:
 # ==========================  Universe builder  ==========================
 
 def _get_catalog_list(label: str) -> List[str]:
-    """Get frozen lists (from snapshot or runtime override)."""
     lst = PEER_CATALOG.get(label, [])
     return lst if lst else []
 
 def build_universe(user_tickers: List[str], mode: str, sample_n: int = 150, custom_raw: str = "") -> Tuple[List[str], str]:
     """
-    Build a peer universe from the STATIC snapshot (or custom paste).
-    - Always excludes user tickers from the peers.
-    - If mode == "Custom (paste list)", comma-separated string is used.
-    - Otherwise uses the full index list and samples down to 'sample_n' deterministically.
+    Build a peer universe from indices.py lists (or snapshot/fallbacks).
+    - Always excludes user tickers from peers.
+    - Custom mode uses comma-separated list.
+    - Index modes start from full list then sample down (deterministic stride) to sample_n.
     """
     user = [yf_symbol(t) for t in user_tickers if t]
     user_set = set(user)
@@ -380,24 +402,23 @@ def build_universe(user_tickers: List[str], mode: str, sample_n: int = 150, cust
         peers_all = [t for t in _get_catalog_list(mode) if t not in user_set]
         label = mode
     else:
-        # Auto selection: detect membership; else default to S&P 500
+        # Auto by membership → else default to S&P 500
         chosen = "S&P 500"
         for label_try in ("S&P 500","Dow 30","NASDAQ 100"):
-            lst = set(_get_catalog_list(label_try))
-            if user_set & lst:
-                chosen = label_try; break
+            base = set(_get_catalog_list(label_try))
+            if user_set & base:
+                chosen = label_try
+                break
         label = chosen
         peers_all = [t for t in _get_catalog_list(chosen) if t not in user_set]
 
-    # Respect sample_n while using the FULL index as source
     if sample_n and len(peers_all) > sample_n:
-        # stable downsampling by stride (preserves broad coverage deterministically)
         step = max(1, len(peers_all)//sample_n)
         peers = peers_all[::step][:sample_n]
     else:
         peers = peers_all
 
-    universe = sorted(list(user_set | set(peers)))[:700]  # final hard cap
+    universe = sorted(list(user_set | set(peers)))[:700]
     return universe, label
 
 # ==========================  Features / Scores  ==========================
@@ -438,3 +459,127 @@ def macro_from_vix(vix_series: pd.Series):
         trend = float(np.clip(trend,0,1))
     macro=float(np.clip(0.70*level+0.30*trend,0,1))
     return macro, vix_last, ema20, rel_gap
+
+# ==========================  Portfolio editor bits (unchanged APIs)  ==========================
+
+CURRENCY_MAP = {"$":"USD","€":"EUR","£":"GBP","CHF":"CHF","C$":"CAD","A$":"AUD","¥":"JPY"}
+def _safe_num(x): return pd.to_numeric(x, errors="coerce")
+
+def normalize_percents_to_100(p: pd.Series) -> pd.Series:
+    p = _safe_num(p).fillna(0.0)
+    s = p.sum()
+    if s <= 0: return p
+    return (p / s) * 100.0
+
+def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFrame:
+    df=df.copy()
+    df["Ticker"]=df["Ticker"].astype(str).str.strip()
+    df=df[df["Ticker"].astype(bool)].reset_index(drop=True)
+    n=len(df)
+    if n==0:
+        df["weight"]=[]
+        return df
+
+    df["Percent (%)"]=_safe_num(df.get("Percent (%)"))
+    df["Amount"]=_safe_num(df.get("Amount"))
+    has_total = (total is not None and total>0)
+
+    if has_total:
+        if mode=="percent":
+            if df["Percent (%)"].fillna(0).sum()==0:
+                df["Percent (%)"]=100.0/n
+            df["Percent (%)"] = normalize_percents_to_100(df["Percent (%)"]).round(2)
+            df["Amount"]=(df["Percent (%)"]/100.0*total).round(2)
+        else:
+            s=df["Amount"].fillna(0).sum()
+            if s>0:
+                df["Percent (%)"]= (df["Amount"]/total*100.0).round(2)
+                df["Percent (%)"]= normalize_percents_to_100(df["Percent (%)"]).round(2)
+                df["Amount"]= (df["Percent (%)"]/100.0*total).round(2)
+            else:
+                df["Percent (%)"]=100.0/n
+                df["Amount"]= (df["Percent (%)"]/100.0*total).round(2)
+    else:
+        if df["Percent (%)"].fillna(0).sum()==0:
+            df["Percent (%)"]=100.0/n
+        df["Percent (%)"]= normalize_percents_to_100(df["Percent (%)"]).round(2)
+
+    if has_total and df["Amount"].fillna(0).sum()>0:
+        w=df["Amount"].fillna(0)/df["Amount"].fillna(0).sum()
+    elif df["Percent (%)"].fillna(0).sum()>0:
+        w=df["Percent (%)"].fillna(0)/df["Percent (%)"].fillna(0).sum()
+    else:
+        w=pd.Series([1.0/n]*n, index=df.index)
+    df["weight"]=w
+    return df
+
+def holdings_editor_form(currency_symbol: str, total_value: float) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if st.session_state.get("grid_df") is None:
+        st.session_state["grid_df"] = pd.DataFrame({
+            "Ticker": ["AAPL", "MSFT", "NVDA", "AMZN"],
+            "Percent (%)": [25.0, 25.0, 25.0, 25.0],
+            "Amount": [np.nan, np.nan, np.nan, np.nan],
+        })
+
+    st.markdown(
+        f"**Holdings**  \n"
+        f"<span class='small-muted'>Enter <b>Ticker</b> and either <b>Percent (%)</b> or "
+        f"<b>Amount ({currency_symbol})</b>. Values update only when you click "
+        f"<b>Apply changes</b>. Use <b>Normalize</b> to force exactly 100% in percent mode.</span>",
+        unsafe_allow_html=True,
+    )
+
+    committed = st.session_state["grid_df"].copy()
+
+    with st.form("holdings_form", clear_on_submit=False):
+        sync_mode = st.segmented_control(
+            "Sync mode",
+            options=["Percent → Amount", "Amount → Percent"],
+            default="Percent → Amount",
+            help="Choose which side drives on Apply."
+        )
+        mode_key = {"Percent → Amount": "percent", "Amount → Percent": "amount"}[sync_mode]
+
+        edited = st.data_editor(
+            committed,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Ticker": st.column_config.TextColumn(width="small"),
+                "Percent (%)": st.column_config.NumberColumn(format="%.2f"),
+                "Amount": st.column_config.NumberColumn(format="%.2f", help=f"Amount in {currency_symbol}"),
+            },
+            key="grid_form",
+        )
+
+        col_a, col_b = st.columns([1, 1])
+        apply_btn = col_a.form_submit_button("Apply changes", type="primary", use_container_width=True)
+        normalize_btn = col_b.form_submit_button("Normalize to 100% (percent mode)", use_container_width=True)
+
+    if normalize_btn:
+        syncd = edited.copy()
+        syncd["Percent (%)"] = normalize_percents_to_100(_safe_num(syncd.get("Percent (%)")))
+        if total_value and total_value>0:
+            syncd["Amount"] = (syncd["Percent (%)"]/100.0*total_value).round(2)
+        st.session_state["grid_df"] = syncd[["Ticker","Percent (%)","Amount"]]
+
+    elif apply_btn:
+        syncd = sync_percent_amount(edited.copy(), total_value, mode_key)
+        st.session_state["grid_df"] = syncd[["Ticker","Percent (%)","Amount"]]
+
+    current = st.session_state["grid_df"].copy()
+    out = current.copy()
+    out["ticker"] = out["Ticker"].map(yf_symbol)
+    out = out[out["ticker"].astype(bool)]
+
+    if total_value and total_value>0 and _safe_num(out["Amount"]).sum()>0:
+        w = _safe_num(out["Amount"]) / _safe_num(out["Amount"]).sum()
+    elif _safe_num(out["Percent (%)"]).sum()>0:
+        w = _safe_num(out["Percent (%)"]) / _safe_num(out["Percent (%)"]).sum()
+    else:
+        n = max(len(out),1)
+        w = pd.Series([1.0/n]*n, index=out.index)
+
+    df_hold = pd.DataFrame({"ticker": out["ticker"], "weight": w})
+    return df_hold, current
