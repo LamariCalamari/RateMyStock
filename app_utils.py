@@ -1,13 +1,12 @@
 # app_utils.py — shared utilities for Rate My (Stock + Portfolio + Tracker)
-# Uses static index lists from indices.py if available; otherwise falls back to local snapshot/web fallbacks.
-# Peer loader is strengthened to improve coverage (singles → bulk → Ticker.history).
+# Includes: UI (CSS/brand), index universes (via indices.py or snapshot), robust price loader,
+# features (technicals/macro), fundamentals fetch, interpretations, and portfolio editor helpers.
 
-import io
 import os
 import json
 import time
 import random
-from typing import Iterable, List, Dict, Tuple
+from typing import Iterable, List, Dict, Tuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -96,7 +95,7 @@ def inline_logo_svg() -> str:
 def brand_header(title: str) -> None:
     st.markdown(f'<div class="brand">{inline_logo_svg()}<h1>{title}</h1></div>', unsafe_allow_html=True)
 
-def topbar_back(label: str = "← Back", url: str | None = None) -> None:
+def topbar_back(label: str = "← Back", url: Optional[str] = None) -> None:
     st.markdown('<div class="topbar">', unsafe_allow_html=True)
     if url: st.page_link(url, label=label)
     st.markdown('</div>', unsafe_allow_html=True)
@@ -133,17 +132,16 @@ def zscore_series(s: pd.Series) -> pd.Series:
 def percentile_rank(s: pd.Series) -> pd.Series:
     return s.rank(pct=True) * 100.0
 
-# ==========================  Index lists: from indices.py if present ==========================
+# ==========================  Index lists (indices.py → snapshot → fallback) ==========================
 
-# If you paste full arrays in indices.py, we’ll use them. Otherwise we fall back to snapshot/fallbacks.
 try:
+    # If you created indices.py with SP500_LIST / NASDAQ100_LIST / DOW30_LIST, use those.
     from indices import SP500_LIST as _SP500, NASDAQ100_LIST as _NDX, DOW30_LIST as _DOW
 except Exception:
     _SP500, _NDX, _DOW = [], [], []
 
 def _normalize_list(tickers: Iterable[str]) -> List[str]:
-    cleaned = []
-    seen = set()
+    cleaned, seen = [], set()
     for s in tickers:
         if not isinstance(s, str): continue
         s = s.strip().upper().replace(".", "-")
@@ -156,15 +154,14 @@ _SNAPSHOT_FILE = os.path.join(os.path.dirname(__file__), "peer_lists_snapshot.js
 
 @st.cache_resource(show_spinner=False)
 def _load_or_snapshot_peer_lists() -> Dict[str, List[str]]:
-    # 1) indices.py wins if provided
+    # 1) indices.py wins
     if _SP500 or _NDX or _DOW:
         return {
             "S&P 500": _normalize_list(_SP500),
             "NASDAQ 100": _normalize_list(_NDX),
             "Dow 30": _normalize_list(_DOW),
         }
-
-    # 2) else try local snapshot
+    # 2) local snapshot
     if os.path.exists(_SNAPSHOT_FILE):
         try:
             with open(_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
@@ -174,85 +171,32 @@ def _load_or_snapshot_peer_lists() -> Dict[str, List[str]]:
             return obj
         except Exception:
             pass
-
-    # 3) else try a one-time fetch (Wikipedia) -> snapshot.
-    try:
-        sp500 = _fetch_sp500_from_web()
-        ndx   = _fetch_nasdaq100_from_web()
-        dow   = _fetch_dow30_from_web()
-        snap = {"S&P 500": sp500, "NASDAQ 100": ndx, "Dow 30": dow}
-        try:
-            with open(_SNAPSHOT_FILE, "w", encoding="utf-8") as f:
-                json.dump(snap, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-        return snap
-    except Exception:
-        # 4) emergency minimal fallback
-        return {
-            "S&P 500": ["AAPL","MSFT","AMZN","NVDA","META","GOOGL","GOOG","BRK-B","LLY","JPM","V","AVGO","TSLA"],
-            "NASDAQ 100": ["AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","AVGO","TSLA","COST","PEP","ADBE","NFLX","AMD"],
-            "Dow 30": ["AAPL","MSFT","AMZN","AXP","BA","CAT","CRM","CSCO","CVX","DIS","GS","HD","HON","IBM","INTC",
-                       "JNJ","JPM","KO","MCD","MMM","MRK","MS","NKE","PG","TRV","UNH","V","VZ","WMT","DOW"],
-        }
-
-# Optional web fetchers (used only if no indices.py and no snapshot)
-def _fetch_sp500_from_web() -> List[str]:
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    tables = pd.read_html(url, flavor="lxml")
-    df = tables[0]
-    return _normalize_list(df["Symbol"].tolist())
-
-def _fetch_nasdaq100_from_web() -> List[str]:
-    url = "https://en.wikipedia.org/wiki/Nasdaq-100"
-    tables = pd.read_html(url, flavor="lxml")
-    df = None
-    for t in tables:
-        cols = [str(c).lower() for c in t.columns]
-        if any("ticker" in c or "symbol" in c for c in cols):
-            df = t; break
-    if df is None:
-        raise RuntimeError("Could not find Nasdaq-100 table")
-    for c in ["Ticker","Symbol","Ticker symbol","Ticker Symbol"]:
-        if c in df.columns:
-            return _normalize_list(df[c].tolist())
-    return _normalize_list(df.iloc[:,0].tolist())
-
-def _fetch_dow30_from_web() -> List[str]:
-    url = "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average"
-    tables = pd.read_html(url, flavor="lxml")
-    df = None
-    for t in tables:
-        if any("Symbol" in str(c) for c in t.columns):
-            df = t; break
-    if df is None:
-        raise RuntimeError("Could not find Dow 30 table")
-    col = None
-    for c in df.columns:
-        if "Symbol" in str(c):
-            col = c; break
-    if col is None:
-        return _normalize_list(df.iloc[:,0].tolist())
-    return _normalize_list(df[col].tolist())
+    # 3) minimal emergency fallback
+    return {
+        "S&P 500": ["AAPL","MSFT","AMZN","NVDA","META","GOOGL","GOOG","BRK-B","LLY","JPM","V","AVGO","TSLA"],
+        "NASDAQ 100": ["AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","AVGO","TSLA","COST","PEP","ADBE","NFLX","AMD"],
+        "Dow 30": ["AAPL","MSFT","AMZN","AXP","BA","CAT","CRM","CSCO","CVX","DIS","GS","HD","HON","IBM","INTC",
+                   "JNJ","JPM","KO","MCD","MMM","MRK","MS","NKE","PG","TRV","UNH","V","VZ","WMT","DOW"],
+    }
 
 PEER_CATALOG: Dict[str, List[str]] = _load_or_snapshot_peer_lists()
 
-def set_peer_catalog(sp500: List[str] | None = None,
-                     ndx: List[str] | None = None,
-                     dow: List[str] | None = None) -> None:
+def set_peer_catalog(sp500: Optional[List[str]] = None,
+                     ndx: Optional[List[str]] = None,
+                     dow: Optional[List[str]] = None) -> None:
     """Optional runtime override."""
     if sp500 is not None: PEER_CATALOG["S&P 500"] = _normalize_list(sp500)
     if ndx is not None:   PEER_CATALOG["NASDAQ 100"] = _normalize_list(ndx)
     if dow is not None:   PEER_CATALOG["Dow 30"] = _normalize_list(dow)
 
-# ==========================  Data fetchers (stronger)  ==========================
+# ==========================  Data fetchers (robust 3-pass)  ==========================
 
 @st.cache_data(show_spinner=False)
 def fetch_prices_chunked_with_fallback(
     tickers: Iterable[str],
     period: str = "1y",
     interval: str = "1d",
-    chunk: int = 20,          # slightly smaller bulks; more reliable
+    chunk: int = 20,          # small bulks → more reliable
     retries: int = 4,         # extra tries
     sleep_between: float = 1.0,
     singles_pause: float = 1.1,
@@ -261,8 +205,8 @@ def fetch_prices_chunked_with_fallback(
     """
     3-pass loader to maximize coverage:
       1) Singles (most reliable)
-      2) Bulk for stragglers (faster)
-      3) Ticker.history() fallback for any remaining
+      2) Bulk for stragglers
+      3) Ticker.history() fallback
     """
     names = [yf_symbol(t) for t in tickers if t]
     names = list(dict.fromkeys(names))[:hard_limit]
@@ -272,7 +216,7 @@ def fetch_prices_chunked_with_fallback(
     frames: List[pd.Series] = []
     ok: List[str] = []
 
-    # -------- Pass 1: singles with retries --------
+    # Pass 1 — singles with retries
     missing = names[:]
     for _ in range(retries):
         new_missing = []
@@ -299,14 +243,14 @@ def fetch_prices_chunked_with_fallback(
         if not missing:
             break
 
-    # -------- Pass 2: bulk groups --------
+    # Pass 2 — bulk groups
     def _append_from_multi(df: pd.DataFrame, group: List[str]):
         if not isinstance(df.columns, pd.MultiIndex):
-            t = group[0]
+            t0 = group[0]
             if "Close" in df:
                 s = df["Close"].dropna()
                 if s.size > 0:
-                    frames.append(s.rename(t)); ok.append(t)
+                    frames.append(s.rename(t0)); ok.append(t0)
             return
         got = set(df.columns.get_level_values(0))
         for t in group:
@@ -328,11 +272,10 @@ def fetch_prices_chunked_with_fallback(
             except Exception:
                 pass
             time.sleep(sleep_between + random.uniform(0, 0.25))
-        # recompute missing after pass 2
         ok_set = set(ok)
         missing = [t for t in names if t not in ok_set]
 
-    # -------- Pass 3: Ticker.history() fallback --------
+    # Pass 3 — Ticker.history() fallback
     if missing:
         for t in missing:
             try:
@@ -386,7 +329,7 @@ def _get_catalog_list(label: str) -> List[str]:
 
 def build_universe(user_tickers: List[str], mode: str, sample_n: int = 150, custom_raw: str = "") -> Tuple[List[str], str]:
     """
-    Build a peer universe from indices.py lists (or snapshot/fallbacks).
+    Build a peer universe from indices.py (if present) or snapshot/fallbacks.
     - Always excludes user tickers from peers.
     - Custom mode uses comma-separated list.
     - Index modes start from full list then sample down (deterministic stride) to sample_n.
@@ -413,6 +356,7 @@ def build_universe(user_tickers: List[str], mode: str, sample_n: int = 150, cust
         peers_all = [t for t in _get_catalog_list(chosen) if t not in user_set]
 
     if sample_n and len(peers_all) > sample_n:
+        # Deterministic stride sampler for stable coverage
         step = max(1, len(peers_all)//sample_n)
         peers = peers_all[::step][:sample_n]
     else:
@@ -460,7 +404,54 @@ def macro_from_vix(vix_series: pd.Series):
     macro=float(np.clip(0.70*level+0.30*trend,0,1))
     return macro, vix_last, ema20, rel_gap
 
-# ==========================  Portfolio editor bits (unchanged APIs)  ==========================
+# ==========================  Fundamentals interpretation  ==========================
+
+def fundamentals_interpretation(zrow: pd.Series) -> List[str]:
+    """Generate human-friendly notes from peer-relative z-scores."""
+    lines=[]
+    def bucket(v, pos_good=True):
+        if pd.isna(v): return "neutral"
+        if pos_good:
+            return "bullish" if v>=0.5 else "watch" if v<=-0.5 else "neutral"
+        else:
+            return "bullish (cheap)" if v>=0.5 else "watch (expensive)" if v<=-0.5 else "neutral"
+
+    g  = bucket(zrow.get("revenueGrowth_z"))
+    e  = bucket(zrow.get("earningsGrowth_z"))
+    pm = bucket(zrow.get("profitMargins_z"))
+    gm = bucket(zrow.get("grossMargins_z"))
+    om = bucket(zrow.get("operatingMargins_z"))
+    roe= bucket(zrow.get("returnOnEquity_z"))
+    val= bucket(zrow.get("forwardPE_z"), pos_good=False)
+    lev= bucket(zrow.get("debtToEquity_z"), pos_good=False)
+
+    if g=="bullish" or e=="bullish": lines.append("**Growth tilt:** above-peer revenue/earnings growth (supportive).")
+    elif g=="watch" or e=="watch":   lines.append("**Growth tilt:** below peers — watch for stabilization or re-acceleration.")
+    else:                            lines.append("**Growth tilt:** broadly in line with peers.")
+
+    if (pm=="bullish" or gm=="bullish" or om=="bullish" or roe=="bullish"):
+        lines.append("**Profitability & margins:** strong vs peers (healthy quality).")
+    elif (pm=="watch" or gm=="watch" or om=="watch" or roe=="watch"):
+        lines.append("**Profitability:** below peer medians — monitor margin trajectory.")
+    else:
+        lines.append("**Profitability:** roughly peer-like.")
+
+    if val.startswith("bullish"):
+        lines.append("**Valuation tilt:** cheaper than peers (potential multiple support).")
+    elif val.startswith("watch"):
+        lines.append("**Valuation tilt:** richer than peers — execution must stay strong.")
+    else:
+        lines.append("**Valuation tilt:** roughly fair vs peers.")
+
+    if lev.startswith("bullish"):
+        lines.append("**Balance sheet:** lower leverage vs peers (lower financial risk).")
+    elif lev.startswith("watch"):
+        lines.append("**Balance sheet:** higher leverage vs peers — keep an eye on rates/cash flow.")
+    else:
+        lines.append("**Balance sheet:** typical for the peer set.")
+    return lines
+
+# ==========================  Portfolio editor helpers  ==========================
 
 CURRENCY_MAP = {"$":"USD","€":"EUR","£":"GBP","CHF":"CHF","C$":"CAD","A$":"AUD","¥":"JPY"}
 def _safe_num(x): return pd.to_numeric(x, errors="coerce")
