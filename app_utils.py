@@ -1,9 +1,11 @@
-# app_utils.py  — shared utilities for Rate My (Stock + Portfolio + Tracker)
-# This file intentionally exposes the original function names your pages import:
-#   inject_css, brand_header, yf_symbol, fetch_prices_chunked_with_fallback, ...
-# No other files need to change.
+# app_utils.py — shared utilities for Rate My (Stock + Portfolio + Tracker)
+# First run: fetches SP500, NASDAQ100, DOW30 from Wikipedia, normalizes,
+# then writes peer_lists_snapshot.json so future runs use a STATIC snapshot.
+# If you prefer fully hard-coded arrays later, just open that JSON and paste.
 
 import io
+import os
+import json
 import time
 import random
 from typing import Iterable, List, Dict, Tuple
@@ -13,11 +15,10 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-
 # ==========================  UI: CSS + Brand  ==========================
 
 def inject_css() -> None:
-    """Inject global CSS and a tiny script that renames the first sidebar item to 'Home'."""
+    """Global CSS + script to rename the first sidebar nav item to 'Home'."""
     st.markdown(
         """
         <style>
@@ -79,7 +80,6 @@ def inject_css() -> None:
         unsafe_allow_html=True,
     )
 
-
 def inline_logo_svg() -> str:
     return """
 <svg class="logo" viewBox="0 0 100 90" xmlns="http://www.w3.org/2000/svg" aria-label="Rate My">
@@ -94,33 +94,22 @@ def inline_logo_svg() -> str:
 </svg>
 """
 
-
 def brand_header(title: str) -> None:
-    """Centered logo + gradient title that always sits side-by-side."""
-    st.markdown(
-        f'<div class="brand">{inline_logo_svg()}<h1>{title}</h1></div>',
-        unsafe_allow_html=True,
-    )
-
+    st.markdown(f'<div class="brand">{inline_logo_svg()}<h1>{title}</h1></div>', unsafe_allow_html=True)
 
 def topbar_back(label: str = "← Back", url: str | None = None) -> None:
     st.markdown('<div class="topbar">', unsafe_allow_html=True)
-    if url:
-        st.page_link(url, label=label)
+    if url: st.page_link(url, label=label)
     st.markdown('</div>', unsafe_allow_html=True)
-
 
 # ==========================  Core helpers  ==========================
 
 def yf_symbol(t: str) -> str:
-    if not isinstance(t, str):
-        return t
+    if not isinstance(t, str): return t
     return t.strip().upper().replace(".", "-")
-
 
 def ema(x: pd.Series, span: int) -> pd.Series:
     return x.ewm(span=span, adjust=False).mean()
-
 
 def rsi(series: pd.Series, window: int = 14) -> pd.Series:
     d = series.diff()
@@ -130,25 +119,124 @@ def rsi(series: pd.Series, window: int = 14) -> pd.Series:
     rs = roll_up / roll_dn.replace(0, np.nan)
     return (100 - (100 / (1 + rs))).fillna(50.0)
 
-
 def macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
     line = ema(series, fast) - ema(series, slow)
     sig  = line.ewm(span=signal, adjust=False).mean()
     hist = line - sig
     return line, sig, hist
 
-
 def zscore_series(s: pd.Series) -> pd.Series:
     s = pd.to_numeric(s, errors="coerce")
     mu, sd = s.mean(), s.std(ddof=0)
-    if sd == 0 or np.isnan(sd):
-        return pd.Series(0.0, index=s.index)
+    if sd == 0 or np.isnan(sd): return pd.Series(0.0, index=s.index)
     return (s - mu) / sd
-
 
 def percentile_rank(s: pd.Series) -> pd.Series:
     return s.rank(pct=True) * 100.0
 
+# ==========================  Peer lists (snapshot on first run) ==========================
+
+_SNAPSHOT_FILE = os.path.join(os.path.dirname(__file__), "peer_lists_snapshot.json")
+
+def _normalize_list(tickers: Iterable[str]) -> List[str]:
+    cleaned = []
+    for s in tickers:
+        if not isinstance(s, str): continue
+        s = s.strip().upper().replace(".", "-")
+        if s: cleaned.append(s)
+    # dedupe keep order
+    seen = set(); out=[]
+    for t in cleaned:
+        if t not in seen:
+            seen.add(t); out.append(t)
+    return out
+
+def _fetch_sp500_from_web() -> List[str]:
+    # Wikipedia: List of S&P 500 companies
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    tables = pd.read_html(url, flavor="lxml")
+    df = tables[0]
+    return _normalize_list(df["Symbol"].tolist())
+
+def _fetch_nasdaq100_from_web() -> List[str]:
+    # Wikipedia: Nasdaq-100 (the constituents table)
+    url = "https://en.wikipedia.org/wiki/Nasdaq-100"
+    tables = pd.read_html(url, flavor="lxml")
+    df = None
+    for t in tables:
+        cols = [str(c).lower() for c in t.columns]
+        if any("ticker" in c or "symbol" in c for c in cols):
+            df = t; break
+    if df is None:
+        raise RuntimeError("Could not find Nasdaq-100 table")
+    for c in ["Ticker","Symbol","Ticker symbol","Ticker Symbol"]:
+        if c in df.columns:
+            return _normalize_list(df[c].tolist())
+    return _normalize_list(df.iloc[:,0].tolist())
+
+def _fetch_dow30_from_web() -> List[str]:
+    # Wikipedia: Dow Jones Industrial Average components
+    url = "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average"
+    tables = pd.read_html(url, flavor="lxml")
+    df = None
+    for t in tables:
+        if any("Symbol" in str(c) for c in t.columns):
+            df = t; break
+    if df is None:
+        raise RuntimeError("Could not find Dow 30 table")
+    col = None
+    for c in df.columns:
+        if "Symbol" in str(c):
+            col = c; break
+    if col is None:
+        return _normalize_list(df.iloc[:,0].tolist())
+    return _normalize_list(df[col].tolist())
+
+@st.cache_resource(show_spinner=False)
+def _load_or_snapshot_peer_lists() -> Dict[str, List[str]]:
+    """Load static lists from JSON or fetch once and persist to JSON."""
+    if os.path.exists(_SNAPSHOT_FILE):
+        try:
+            with open(_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
+                obj = json.load(f)
+            # normalize again to be safe
+            for k in obj:
+                obj[k] = _normalize_list(obj[k])
+            return obj
+        except Exception:
+            pass  # fall through to rebuild
+
+    # First run: fetch from web, normalize, persist
+    try:
+        sp500 = _fetch_sp500_from_web()
+        ndx   = _fetch_nasdaq100_from_web()
+        dow   = _fetch_dow30_from_web()
+        snap = {"S&P 500": sp500, "NASDAQ 100": ndx, "Dow 30": dow}
+        try:
+            with open(_SNAPSHOT_FILE, "w", encoding="utf-8") as f:
+                json.dump(snap, f, ensure_ascii=False, indent=2)
+        except Exception:
+            # if writing fails (read-only), still return in-memory lists
+            pass
+        return snap
+    except Exception:
+        # Emergency minimal fallbacks so the app still runs
+        return {
+            "S&P 500": ["AAPL","MSFT","AMZN","NVDA","META","GOOGL","GOOG","BRK-B","LLY","JPM","V","AVGO","TSLA"],
+            "NASDAQ 100": ["AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","AVGO","TSLA","COST","PEP","ADBE","NFLX","AMD"],
+            "Dow 30": ["AAPL","MSFT","AMZN","AXP","BA","CAT","CRM","CSCO","CVX","DIS","GS","HD","HON","IBM","INTC","JNJ","JPM","KO","MCD","MMM","MRK","MS","NKE","PG","TRV","UNH","V","VZ","WMT","DOW"],
+        }
+
+# Exposed catalog used by build_universe()
+PEER_CATALOG: Dict[str, List[str]] = _load_or_snapshot_peer_lists()
+
+def set_peer_catalog(sp500: List[str] | None = None,
+                     ndx: List[str] | None = None,
+                     dow: List[str] | None = None) -> None:
+    """Optional hook to override lists at runtime (e.g., from a local CSV)."""
+    if sp500 is not None: PEER_CATALOG["S&P 500"] = _normalize_list(sp500)
+    if ndx is not None:   PEER_CATALOG["NASDAQ 100"] = _normalize_list(ndx)
+    if dow is not None:   PEER_CATALOG["Dow 30"] = _normalize_list(dow)
 
 # ==========================  Data fetchers  ==========================
 
@@ -161,12 +249,13 @@ def fetch_prices_chunked_with_fallback(
     retries: int = 3,
     sleep_between: float = 0.75,
     singles_pause: float = 0.60,
-    hard_limit: int = 350,
+    hard_limit: int = 700,   # allow very large universes
 ) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Maximize coverage:
-      1) Fetch EACH ticker individually (reliable).
-      2) Bulk any stragglers to speed up if possible.
+    Robust fetcher for MANY symbols.
+      - Pass 1: singles (reliable)
+      - Pass 2: bulk for stragglers
+    Tuned delays to be gentler on yfinance for 150–300 names.
     """
     names = [yf_symbol(t) for t in tickers if t]
     names = list(dict.fromkeys(names))[:hard_limit]
@@ -238,108 +327,86 @@ def fetch_prices_chunked_with_fallback(
     ok = list(dict.fromkeys(ok))
     return prices, ok
 
-
 @st.cache_data(show_spinner=False)
 def fetch_vix_series(period: str = "6mo", interval: str = "1d") -> pd.Series:
     try:
         df = yf.Ticker("^VIX").history(period=period, interval=interval)
-        if not df.empty:
-            return df["Close"].rename("^VIX")
+        if not df.empty: return df["Close"].rename("^VIX")
     except Exception:
         pass
     return pd.Series(dtype=float)
-
 
 @st.cache_data(show_spinner=False)
 def fetch_fundamentals_simple(tickers: Iterable[str]) -> pd.DataFrame:
     keep = ["revenueGrowth","earningsGrowth","returnOnEquity",
             "profitMargins","grossMargins","operatingMargins","ebitdaMargins",
             "trailingPE","forwardPE","debtToEquity"]
-    rows = []
+    rows=[]
     for raw in tickers:
-        t = yf_symbol(raw)
+        t=yf_symbol(raw)
         try:
             info = yf.Ticker(t).info or {}
         except Exception:
-            info = {}
-        row = {"ticker": t}
+            info={}
+        row={"ticker":t}
         for k in keep:
-            try:
-                row[k] = float(info.get(k, np.nan))
-            except Exception:
-                row[k] = np.nan
+            try: row[k]=float(info.get(k, np.nan))
+            except Exception: row[k]=np.nan
         rows.append(row)
     return pd.DataFrame(rows).set_index("ticker")
 
+# ==========================  Universe builder  ==========================
 
-# ==========================  Peer universes  ==========================
+def _get_catalog_list(label: str) -> List[str]:
+    """Get frozen lists (from snapshot or runtime override)."""
+    lst = PEER_CATALOG.get(label, [])
+    return lst if lst else []
 
-SP500_FALLBACK = ["AAPL","MSFT","AMZN","NVDA","META","GOOGL","GOOG","TSLA","AVGO","BRK-B","UNH","LLY","V","JPM"]
-DOW30_FALLBACK = ["AAPL","MSFT","JPM","V","JNJ","WMT","PG","UNH","DIS","HD","INTC","IBM","KO","MCD","NKE","TRV","VZ","CSCO"]
-NASDAQ100_FALLBACK = ["AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","AVGO","TSLA","COST","PEP","ADBE","NFLX","CSCO","AMD"]
+def build_universe(user_tickers: List[str], mode: str, sample_n: int = 150, custom_raw: str = "") -> Tuple[List[str], str]:
+    """
+    Build a peer universe from the STATIC snapshot (or custom paste).
+    - Always excludes user tickers from the peers.
+    - If mode == "Custom (paste list)", comma-separated string is used.
+    - Otherwise uses the full index list and samples down to 'sample_n' deterministically.
+    """
+    user = [yf_symbol(t) for t in user_tickers if t]
+    user_set = set(user)
 
-def list_sp500():
-    try:
-        got = {yf_symbol(t) for t in yf.tickers_sp500()}
-        if got: return got
-    except Exception:
-        pass
-    return set(SP500_FALLBACK)
-
-def list_dow30():
-    try:
-        got = {yf_symbol(t) for t in yf.tickers_dow()}
-        if got: return got
-    except Exception:
-        pass
-    return set(DOW30_FALLBACK)
-
-def list_nasdaq100():
-    try:
-        if hasattr(yf,"tickers_nasdaq"):
-            got = {yf_symbol(t) for t in yf.tickers_nasdaq()}
-            if got: return got
-    except Exception:
-        pass
-    return set(NASDAQ100_FALLBACK)
-
-def build_universe(user_tickers, mode, sample_n=150, custom_raw=""):
-    user = [yf_symbol(t) for t in user_tickers]
-    if mode == "S&P 500":
-        peers_all = list_sp500(); label="S&P 500"
-    elif mode == "Dow 30":
-        peers_all = list_dow30(); label="Dow 30"
-    elif mode == "NASDAQ 100":
-        peers_all = list_nasdaq100(); label="NASDAQ 100"
-    elif mode == "Custom (paste list)":
+    if mode == "Custom (paste list)":
         custom = {yf_symbol(t) for t in custom_raw.split(",") if t.strip()}
-        return sorted(set(user)|custom)[:350], "Custom"
+        peers_all = sorted(list(custom - user_set))
+        label = "Custom"
+    elif mode in ("S&P 500", "NASDAQ 100", "Dow 30"):
+        peers_all = [t for t in _get_catalog_list(mode) if t not in user_set]
+        label = mode
     else:
-        sp, dj, nd = list_sp500(), list_dow30(), list_nasdaq100()
-        auto=set(); label="S&P 500"
-        if len(user)==1:
-            t=user[0]
-            if   t in sp: auto=sp; label="S&P 500"
-            elif t in dj: auto=dj; label="Dow 30"
-            elif t in nd: auto=nd; label="NASDAQ 100"
-        else:
-            for t in user:
-                if t in sp: auto|=sp; label="S&P 500"
-                elif t in dj: auto|=dj; label="Dow 30"
-                elif t in nd: auto|=nd; label="NASDAQ 100"
-        peers_all = auto if auto else sp
-    peers = sorted(peers_all.difference(set(user)))[:max(1, sample_n)]
-    return sorted(set(user)|set(peers))[:350], label
+        # Auto selection: detect membership; else default to S&P 500
+        chosen = "S&P 500"
+        for label_try in ("S&P 500","Dow 30","NASDAQ 100"):
+            lst = set(_get_catalog_list(label_try))
+            if user_set & lst:
+                chosen = label_try; break
+        label = chosen
+        peers_all = [t for t in _get_catalog_list(chosen) if t not in user_set]
 
+    # Respect sample_n while using the FULL index as source
+    if sample_n and len(peers_all) > sample_n:
+        # stable downsampling by stride (preserves broad coverage deterministically)
+        step = max(1, len(peers_all)//sample_n)
+        peers = peers_all[::step][:sample_n]
+    else:
+        peers = peers_all
 
-# ==========================  Feature builders  ==========================
+    universe = sorted(list(user_set | set(peers)))[:700]  # final hard cap
+    return universe, label
+
+# ==========================  Features / Scores  ==========================
 
 def technical_scores(price_panel: Dict[str, pd.Series]) -> pd.DataFrame:
     rows=[]
     for ticker, px in price_panel.items():
         px=px.dropna()
-        if len(px)<60:
-            continue
+        if len(px)<60: continue
         ema50  = ema(px,50)
         base50 = ema50.iloc[-1] if pd.notna(ema50.iloc[-1]) and ema50.iloc[-1]!=0 else np.nan
         dma_gap=(px.iloc[-1]-ema50.iloc[-1])/base50 if pd.notna(base50) else np.nan
@@ -349,14 +416,11 @@ def technical_scores(price_panel: Dict[str, pd.Series]) -> pd.DataFrame:
         rsi_strength = (r-50.0)/50.0 if pd.notna(r) else np.nan
         mom = np.nan
         if len(px) > 252:
-            try:
-                mom = px.iloc[-1]/px.iloc[-253]-1.0
-            except Exception:
-                mom = np.nan
+            try: mom = px.iloc[-1]/px.iloc[-253]-1.0
+            except Exception: mom = np.nan
         rows.append({"ticker":ticker,"dma_gap":dma_gap,"macd_hist":macd_hist,
                      "rsi_strength":rsi_strength,"mom12m":mom})
     return pd.DataFrame(rows).set_index("ticker") if rows else pd.DataFrame()
-
 
 def macro_from_vix(vix_series: pd.Series):
     if vix_series is None or vix_series.empty:
@@ -374,208 +438,3 @@ def macro_from_vix(vix_series: pd.Series):
         trend = float(np.clip(trend,0,1))
     macro=float(np.clip(0.70*level+0.30*trend,0,1))
     return macro, vix_last, ema20, rel_gap
-
-
-# ==========================  Interpretations  ==========================
-
-def fundamentals_interpretation(zrow: pd.Series) -> List[str]:
-    lines=[]
-    def bucket(v, pos_good=True):
-        if pd.isna(v): return "neutral"
-        if pos_good:
-            return "bullish" if v>=0.5 else "watch" if v<=-0.5 else "neutral"
-        else:
-            return "bullish (cheap)" if v>=0.5 else "watch (expensive)" if v<=-0.5 else "neutral"
-
-    g  = bucket(zrow.get("revenueGrowth_z"))
-    e  = bucket(zrow.get("earningsGrowth_z"))
-    pm = bucket(zrow.get("profitMargins_z"))
-    gm = bucket(zrow.get("grossMargins_z"))
-    om = bucket(zrow.get("operatingMargins_z"))
-    roe= bucket(zrow.get("returnOnEquity_z"))
-    val= bucket(zrow.get("forwardPE_z"), pos_good=False)
-    lev= bucket(zrow.get("debtToEquity_z"), pos_good=False)
-
-    if g=="bullish" or e=="bullish": lines.append("**Growth tilt:** above-peer revenue/earnings growth (supportive).")
-    elif g=="watch" or e=="watch":   lines.append("**Growth tilt:** below peers — watch for stabilization or re-acceleration.")
-    else:                            lines.append("**Growth tilt:** broadly in line with peers.")
-
-    if (pm=="bullish" or gm=="bullish" or om=="bullish" or roe=="bullish"):
-        lines.append("**Profitability & margins:** strong vs peers (healthy quality).")
-    elif (pm=="watch" or gm=="watch" or om=="watch" or roe=="watch"):
-        lines.append("**Profitability:** below peer medians — monitor margin trajectory.")
-    else:
-        lines.append("**Profitability:** roughly peer-like.")
-
-    if val.startswith("bullish"):
-        lines.append("**Valuation tilt:** cheaper than peers (potential multiple support).")
-    elif val.startswith("watch"):
-        lines.append("**Valuation tilt:** richer than peers — execution must stay strong.")
-    else:
-        lines.append("**Valuation tilt:** roughly fair vs peers.")
-
-    if lev.startswith("bullish"):
-        lines.append("**Balance sheet:** lower leverage vs peers (lower financial risk).")
-    elif lev.startswith("watch"):
-        lines.append("**Balance sheet:** higher leverage vs peers — keep an eye on rates/cash flow.")
-    else:
-        lines.append("**Balance sheet:** typical for the peer set.")
-    return lines
-
-
-# ==========================  Charts  ==========================
-
-def draw_stock_charts(t: str, series: pd.Series) -> None:
-    if series is None or series.empty:
-        st.info("Not enough history to show charts.")
-        return
-
-    st.subheader("📈 Price & EMAs")
-    e20, e50 = ema(series,20), ema(series,50)
-    price_df = pd.DataFrame({"Close": series, "EMA20": e20, "EMA50": e50})
-    st.line_chart(price_df, use_container_width=True)
-    st.caption("If price is **above EMA50/EMA20**, trend bias is positive; **below** suggests a headwind.")
-
-    st.subheader("📉 MACD")
-    line, sig, hist = macd(series)
-    st.line_chart(pd.DataFrame({"MACD line": line, "Signal": sig}), use_container_width=True)
-    st.bar_chart(pd.DataFrame({"Histogram": hist}), use_container_width=True)
-    st.caption("Rising histogram above zero → momentum building; falling below zero → fading.")
-
-    st.subheader("🔁 RSI (14)")
-    st.line_chart(pd.DataFrame({"RSI(14)": rsi(series)}), use_container_width=True)
-    st.caption(">70 = overbought • <30 = oversold • around 50 = neutral trend strength.")
-
-    st.subheader("🚀 12-month momentum")
-    if len(series) > 252:
-        mom12 = series/series.shift(253)-1.0
-        st.line_chart(pd.DataFrame({"12m momentum": mom12}), use_container_width=True)
-        st.caption("Positive vs one year ago → outperformance; negative → underperformance.")
-    else:
-        st.info("Need > 1 year of data to show the 12-month momentum line.")
-
-
-# ==========================  Portfolio editor  ==========================
-
-CURRENCY_MAP = {"$":"USD","€":"EUR","£":"GBP","CHF":"CHF","C$":"CAD","A$":"AUD","¥":"JPY"}
-def _safe_num(x): return pd.to_numeric(x, errors="coerce")
-
-def normalize_percents_to_100(p: pd.Series) -> pd.Series:
-    p = _safe_num(p).fillna(0.0)
-    s = p.sum()
-    if s <= 0: return p
-    return (p / s) * 100.0
-
-def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFrame:
-    df=df.copy()
-    df["Ticker"]=df["Ticker"].astype(str).str.strip()
-    df=df[df["Ticker"].astype(bool)].reset_index(drop=True)
-    n=len(df)
-    if n==0:
-        df["weight"]=[]
-        return df
-
-    df["Percent (%)"]=_safe_num(df.get("Percent (%)"))
-    df["Amount"]=_safe_num(df.get("Amount"))
-    has_total = (total is not None and total>0)
-
-    if has_total:
-        if mode=="percent":
-            if df["Percent (%)"].fillna(0).sum()==0:
-                df["Percent (%)"]=100.0/n
-            df["Percent (%)"] = normalize_percents_to_100(df["Percent (%)"]).round(2)
-            df["Amount"]=(df["Percent (%)"]/100.0*total).round(2)
-        else:
-            s=df["Amount"].fillna(0).sum()
-            if s>0:
-                df["Percent (%)"]= (df["Amount"]/total*100.0).round(2)
-                df["Percent (%)"]= normalize_percents_to_100(df["Percent (%)"]).round(2)
-                df["Amount"]= (df["Percent (%)"]/100.0*total).round(2)
-            else:
-                df["Percent (%)"]=100.0/n
-                df["Amount"]= (df["Percent (%)"]/100.0*total).round(2)
-    else:
-        if df["Percent (%)"].fillna(0).sum()==0:
-            df["Percent (%)"]=100.0/n
-        df["Percent (%)"]= normalize_percents_to_100(df["Percent (%)"]).round(2)
-
-    if has_total and df["Amount"].fillna(0).sum()>0:
-        w=df["Amount"].fillna(0)/df["Amount"].fillna(0).sum()
-    elif df["Percent (%)"].fillna(0).sum()>0:
-        w=df["Percent (%)"].fillna(0)/df["Percent (%)"].fillna(0).sum()
-    else:
-        w=pd.Series([1.0/n]*n, index=df.index)
-    df["weight"]=w
-    return df
-
-
-def holdings_editor_form(currency_symbol: str, total_value: float) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    if st.session_state.get("grid_df") is None:
-        st.session_state["grid_df"] = pd.DataFrame({
-            "Ticker": ["AAPL", "MSFT", "NVDA", "AMZN"],
-            "Percent (%)": [25.0, 25.0, 25.0, 25.0],
-            "Amount": [np.nan, np.nan, np.nan, np.nan],
-        })
-
-    st.markdown(
-        f"**Holdings**  \n"
-        f"<span class='small-muted'>Enter <b>Ticker</b> and either <b>Percent (%)</b> or "
-        f"<b>Amount ({currency_symbol})</b>. Values update only when you click "
-        f"<b>Apply changes</b>. Use <b>Normalize</b> to force exactly 100% in percent mode.</span>",
-        unsafe_allow_html=True,
-    )
-
-    committed = st.session_state["grid_df"].copy()
-
-    with st.form("holdings_form", clear_on_submit=False):
-        sync_mode = st.segmented_control(
-            "Sync mode",
-            options=["Percent → Amount", "Amount → Percent"],
-            default="Percent → Amount",
-            help="Choose which side drives on Apply."
-        )
-        mode_key = {"Percent → Amount": "percent", "Amount → Percent": "amount"}[sync_mode]
-
-        edited = st.data_editor(
-            committed,
-            num_rows="dynamic",
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Ticker": st.column_config.TextColumn(width="small"),
-                "Percent (%)": st.column_config.NumberColumn(format="%.2f"),
-                "Amount": st.column_config.NumberColumn(format="%.2f", help=f"Amount in {currency_symbol}"),
-            },
-            key="grid_form",
-        )
-
-        col_a, col_b = st.columns([1, 1])
-        apply_btn = col_a.form_submit_button("Apply changes", type="primary", use_container_width=True)
-        normalize_btn = col_b.form_submit_button("Normalize to 100% (percent mode)", use_container_width=True)
-
-    if normalize_btn:
-        syncd = edited.copy()
-        syncd["Percent (%)"] = normalize_percents_to_100(_safe_num(syncd.get("Percent (%)")))
-        if total_value and total_value>0:
-            syncd["Amount"] = (syncd["Percent (%)"]/100.0*total_value).round(2)
-        st.session_state["grid_df"] = syncd[["Ticker","Percent (%)","Amount"]]
-
-    elif apply_btn:
-        syncd = sync_percent_amount(edited.copy(), total_value, mode_key)
-        st.session_state["grid_df"] = syncd[["Ticker","Percent (%)","Amount"]]
-
-    current = st.session_state["grid_df"].copy()
-    out = current.copy()
-    out["ticker"] = out["Ticker"].map(yf_symbol)
-    out = out[out["ticker"].astype(bool)]
-
-    if total_value and total_value>0 and _safe_num(out["Amount"]).sum()>0:
-        w = _safe_num(out["Amount"]) / _safe_num(out["Amount"]).sum()
-    elif _safe_num(out["Percent (%)"]).sum()>0:
-        w = _safe_num(out["Percent (%)"]) / _safe_num(out["Percent (%)"]).sum()
-    else:
-        n = max(len(out),1)
-        w = pd.Series([1.0/n]*n, index=out.index)
-
-    df_hold = pd.DataFrame({"ticker": out["ticker"], "weight": w})
-    return df_hold, current
