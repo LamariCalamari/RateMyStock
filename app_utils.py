@@ -1,8 +1,10 @@
 # app_utils.py — shared utilities for Rate My (Stock + Portfolio + Tracker)
-# Includes: UI (CSS/brand), index universes (via indices.py or snapshot), robust price loader,
-# features (technicals/macro), fundamentals fetch, interpretations, and portfolio editor helpers.
+# UI (CSS/brand), peer universes (via indices.py or snapshot), robust price loader,
+# features (technicals/macro), fundamentals fetch, interpretations, portfolio editor helpers,
+# + NEW: company financial statements, key ratios, and narrative interpretation.
 
 import os
+import re
 import json
 import time
 import random
@@ -56,6 +58,9 @@ def inject_css() -> None:
         .cta .stButton>button:hover{ transform:translateY(-1px); filter:saturate(1.06) brightness(1.05); }
         .cta.dark .stButton>button:hover{ border-color:#3a3f46; }
         .hr-lite{height:1px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.08),transparent);border:0;margin:18px 0;}
+
+        /* Statement sections */
+        .pill{display:inline-block;padding:.15rem .5rem;border-radius:999px;border:1px solid #2c3239;background:#151920;color:#cfd4da;font-size:.85rem}
         </style>
 
         <script>
@@ -135,7 +140,6 @@ def percentile_rank(s: pd.Series) -> pd.Series:
 # ==========================  Index lists (indices.py → snapshot → fallback) ==========================
 
 try:
-    # If you created indices.py with SP500_LIST / NASDAQ100_LIST / DOW30_LIST, use those.
     from indices import SP500_LIST as _SP500, NASDAQ100_LIST as _NDX, DOW30_LIST as _DOW
 except Exception:
     _SP500, _NDX, _DOW = [], [], []
@@ -154,14 +158,12 @@ _SNAPSHOT_FILE = os.path.join(os.path.dirname(__file__), "peer_lists_snapshot.js
 
 @st.cache_resource(show_spinner=False)
 def _load_or_snapshot_peer_lists() -> Dict[str, List[str]]:
-    # 1) indices.py wins
     if _SP500 or _NDX or _DOW:
         return {
             "S&P 500": _normalize_list(_SP500),
             "NASDAQ 100": _normalize_list(_NDX),
             "Dow 30": _normalize_list(_DOW),
         }
-    # 2) local snapshot
     if os.path.exists(_SNAPSHOT_FILE):
         try:
             with open(_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
@@ -171,7 +173,6 @@ def _load_or_snapshot_peer_lists() -> Dict[str, List[str]]:
             return obj
         except Exception:
             pass
-    # 3) minimal emergency fallback
     return {
         "S&P 500": ["AAPL","MSFT","AMZN","NVDA","META","GOOGL","GOOG","BRK-B","LLY","JPM","V","AVGO","TSLA"],
         "NASDAQ 100": ["AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","AVGO","TSLA","COST","PEP","ADBE","NFLX","AMD"],
@@ -184,7 +185,6 @@ PEER_CATALOG: Dict[str, List[str]] = _load_or_snapshot_peer_lists()
 def set_peer_catalog(sp500: Optional[List[str]] = None,
                      ndx: Optional[List[str]] = None,
                      dow: Optional[List[str]] = None) -> None:
-    """Optional runtime override."""
     if sp500 is not None: PEER_CATALOG["S&P 500"] = _normalize_list(sp500)
     if ndx is not None:   PEER_CATALOG["NASDAQ 100"] = _normalize_list(ndx)
     if dow is not None:   PEER_CATALOG["Dow 30"] = _normalize_list(dow)
@@ -196,18 +196,12 @@ def fetch_prices_chunked_with_fallback(
     tickers: Iterable[str],
     period: str = "1y",
     interval: str = "1d",
-    chunk: int = 20,          # small bulks → more reliable
-    retries: int = 4,         # extra tries
+    chunk: int = 20,
+    retries: int = 4,
     sleep_between: float = 1.0,
     singles_pause: float = 1.1,
     hard_limit: int = 700,
 ) -> Tuple[pd.DataFrame, List[str]]:
-    """
-    3-pass loader to maximize coverage:
-      1) Singles (most reliable)
-      2) Bulk for stragglers
-      3) Ticker.history() fallback
-    """
     names = [yf_symbol(t) for t in tickers if t]
     names = list(dict.fromkeys(names))[:hard_limit]
     if not names:
@@ -328,12 +322,6 @@ def _get_catalog_list(label: str) -> List[str]:
     return lst if lst else []
 
 def build_universe(user_tickers: List[str], mode: str, sample_n: int = 150, custom_raw: str = "") -> Tuple[List[str], str]:
-    """
-    Build a peer universe from indices.py (if present) or snapshot/fallbacks.
-    - Always excludes user tickers from peers.
-    - Custom mode uses comma-separated list.
-    - Index modes start from full list then sample down (deterministic stride) to sample_n.
-    """
     user = [yf_symbol(t) for t in user_tickers if t]
     user_set = set(user)
 
@@ -345,7 +333,6 @@ def build_universe(user_tickers: List[str], mode: str, sample_n: int = 150, cust
         peers_all = [t for t in _get_catalog_list(mode) if t not in user_set]
         label = mode
     else:
-        # Auto by membership → else default to S&P 500
         chosen = "S&P 500"
         for label_try in ("S&P 500","Dow 30","NASDAQ 100"):
             base = set(_get_catalog_list(label_try))
@@ -356,7 +343,6 @@ def build_universe(user_tickers: List[str], mode: str, sample_n: int = 150, cust
         peers_all = [t for t in _get_catalog_list(chosen) if t not in user_set]
 
     if sample_n and len(peers_all) > sample_n:
-        # Deterministic stride sampler for stable coverage
         step = max(1, len(peers_all)//sample_n)
         peers = peers_all[::step][:sample_n]
     else:
@@ -407,7 +393,6 @@ def macro_from_vix(vix_series: pd.Series):
 # ==========================  Fundamentals interpretation  ==========================
 
 def fundamentals_interpretation(zrow: pd.Series) -> List[str]:
-    """Generate human-friendly notes from peer-relative z-scores."""
     lines=[]
     def bucket(v, pos_good=True):
         if pd.isna(v): return "neutral"
@@ -574,3 +559,296 @@ def holdings_editor_form(currency_symbol: str, total_value: float) -> Tuple[pd.D
 
     df_hold = pd.DataFrame({"ticker": out["ticker"], "weight": w})
     return df_hold, current
+
+# ==========================  NEW: Company financial statements ==========================
+
+_CURRENCY_SYMBOL = {
+    "USD": "$", "EUR": "€", "GBP": "£", "JPY": "¥", "CAD": "C$", "AUD": "A$", "CHF": "CHF",
+    "SEK": "kr", "NOK": "kr", "DKK": "kr", "HKD": "HK$", "CNY": "¥", "INR": "₹", "SGD": "S$"
+}
+
+def _norm_rowname(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+def _pick(df: pd.DataFrame, candidates: List[str]) -> Optional[pd.Series]:
+    if df is None or df.empty: return None
+    norm_index = { _norm_rowname(idx): idx for idx in df.index.astype(str) }
+    for c in candidates:
+        key = _norm_rowname(c)
+        if key in norm_index:
+            return pd.to_numeric(df.loc[norm_index[key]], errors="coerce")
+    # fallback: contains
+    for c in candidates:
+        key = _norm_rowname(c)
+        for k, orig in norm_index.items():
+            if key in k:
+                return pd.to_numeric(df.loc[orig], errors="coerce")
+    return None
+
+def _clean_statement(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or isinstance(df, float): return pd.DataFrame()
+    if df.empty: return pd.DataFrame()
+    # yfinance statements: rows = line items, cols = period end dates
+    out = df.copy()
+    out = out[~out.index.duplicated(keep="first")]
+    # ensure numeric
+    for c in out.columns:
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+    # sort columns ascending by date if possible
+    try:
+        out.columns = pd.to_datetime(out.columns)
+        out = out.sort_index(axis=1)
+    except Exception:
+        pass
+    return out
+
+@st.cache_data(show_spinner=False)
+def fetch_company_statements(ticker: str) -> Dict[str, object]:
+    t = yf.Ticker(yf_symbol(ticker))
+    try:
+        info = t.info or {}
+    except Exception:
+        info = {}
+    currency = info.get("financialCurrency") or info.get("currency") or "USD"
+
+    def safe(attr):
+        try:
+            df = getattr(t, attr)
+            return _clean_statement(df)
+        except Exception:
+            return pd.DataFrame()
+
+    data = {
+        "currency": currency,
+        "income": safe("financials"),
+        "balance": safe("balance_sheet"),
+        "cashflow": safe("cashflow"),
+        "income_q": safe("quarterly_financials"),
+        "balance_q": safe("quarterly_balance_sheet"),
+        "cashflow_q": safe("quarterly_cashflow"),
+    }
+    return data
+
+def _scale_unit(df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
+    """Scale to an easy unit (auto choose B / M / K)."""
+    if df is None or df.empty: return df, ""
+    vals = pd.to_numeric(df.replace([np.inf, -np.inf], np.nan).stack(), errors="coerce").dropna()
+    if vals.empty: return df, ""
+    m = np.nanmedian(np.abs(vals))
+    if m >= 1e9:
+        return (df / 1e9).round(2), " (billions)"
+    if m >= 1e6:
+        return (df / 1e6).round(2), " (millions)"
+    if m >= 1e3:
+        return (df / 1e3).round(2), " (thousands)"
+    return df.round(2), ""
+
+def statement_metrics(stmts: Dict[str, object]) -> Dict[str, float]:
+    """Compute key ratios/trends from statements (annual preferred)."""
+    inc = stmts.get("income", pd.DataFrame())
+    bs  = stmts.get("balance", pd.DataFrame())
+    cf  = stmts.get("cashflow", pd.DataFrame())
+
+    # helpers
+    rev   = _pick(inc, ["Total Revenue","Revenue","Sales"])
+    gross = _pick(inc, ["Gross Profit"])
+    opinc = _pick(inc, ["Operating Income","Operating Profit","Ebit"])
+    net   = _pick(inc, ["Net Income","Net Income Applicable To Common Shares","Net Income Common Stockholders"])
+    cogs  = _pick(inc, ["Cost Of Revenue","Cost of Goods Sold"])
+    tax   = _pick(inc, ["Income Tax Expense"])
+    intr  = _pick(inc, ["Interest Expense","Interest Expense Non Operating"])
+
+    ta    = _pick(bs,  ["Total Assets"])
+    teq   = _pick(bs,  ["Total Stockholder Equity","Total Equity","Total Shareholder Equity"])
+    tliab = _pick(bs,  ["Total Liab","Total Liabilities"])
+    ca    = _pick(bs,  ["Total Current Assets"])
+    cl    = _pick(bs,  ["Total Current Liabilities"])
+    inv   = _pick(bs,  ["Inventory"])
+    ltd   = _pick(bs,  ["Long Term Debt"])
+    std   = _pick(bs,  ["Short Long Term Debt","Short-Term Debt","Current Portion of Long Term Debt"])
+    notes = _pick(bs,  ["Notes Payable"])
+
+    ocf   = _pick(cf,  ["Total Cash From Operating Activities","Operating Cash Flow"])
+    capex = _pick(cf,  ["Capital Expenditures","Investments In Property Plant And Equipment"])
+
+    def last(series): 
+        return (series.dropna().iloc[-1] if series is not None and series.dropna().size else np.nan)
+    def prev(series):
+        return (series.dropna().iloc[-2] if series is not None and series.dropna().size>1 else np.nan)
+
+    revenue      = float(last(rev))
+    revenue_prev = float(prev(rev))
+    gross_profit = float(last(gross))
+    operating_inc= float(last(opinc))
+    net_income   = float(last(net))
+    interest_exp = abs(float(last(intr))) if not np.isnan(last(intr)) else np.nan
+
+    total_assets = float(last(ta))
+    equity       = float(last(teq)) if not np.isnan(last(teq)).any() if isinstance(teq, pd.Series) else float(last(teq))
+    if np.isnan(equity):
+        equity = float(last(ta)) - float(last(tliab)) if not (np.isnan(last(ta)) or np.isnan(last(tliab))) else np.nan
+
+    current_assets     = float(last(ca))
+    current_liabilities= float(last(cl))
+    inventory          = float(last(inv))
+    lt_debt            = float(last(ltd))
+    st_debt            = float(last(std))
+    notes_pay          = float(last(notes))
+    total_debt         = np.nansum([lt_debt, st_debt, notes_pay])
+
+    op_cash_flow = float(last(ocf))
+    capex_val    = float(last(capex))
+    fcf          = op_cash_flow - (capex_val if not np.isnan(capex_val) else 0.0)
+
+    # margins & growth
+    gross_margin      = (gross_profit/revenue) if revenue else np.nan
+    operating_margin  = (operating_inc/revenue) if revenue else np.nan
+    net_margin        = (net_income/revenue) if revenue else np.nan
+    fcf_margin        = (fcf/revenue) if revenue else np.nan
+    revenue_yoy       = (revenue/revenue_prev - 1.0) if (revenue_prev and not np.isnan(revenue_prev)) else np.nan
+
+    # liquidity
+    current_ratio = (current_assets/current_liabilities) if current_liabilities else np.nan
+    quick_ratio   = ((current_assets - (inventory if not np.isnan(inventory) else 0.0)) / current_liabilities) if current_liabilities else np.nan
+
+    # leverage & returns
+    d_to_e   = (total_debt/equity) if equity else np.nan
+    roe      = (net_income/equity) if equity else np.nan
+    roa      = (net_income/total_assets) if total_assets else np.nan
+    icov     = (operating_inc/interest_exp) if interest_exp and not np.isnan(operating_inc) else np.nan
+
+    # margin trends (YoY)
+    def _ratio_yoy(series_num, series_den):
+        try:
+            n0, n1 = float(last(series_num)), float(prev(series_num))
+            d0, d1 = float(last(series_den)), float(prev(series_den))
+            if d0 and d1:
+                m0, m1 = (n0/d0), (n1/d1)
+                return m0, (m0 - m1)
+        except Exception:
+            pass
+        return np.nan, np.nan
+
+    gm, gm_chg = _ratio_yoy(gross, rev)
+    om, om_chg = _ratio_yoy(opinc, rev)
+    nm, nm_chg = _ratio_yoy(net, rev)
+
+    # 3Y revenue CAGR
+    revenue_cagr = np.nan
+    if rev is not None and rev.dropna().size >= 4:
+        try:
+            v0 = float(rev.dropna().iloc[-4])
+            v1 = float(rev.dropna().iloc[-1])
+            if v0>0 and v1>0:
+                revenue_cagr = (v1/v0)**(1/3) - 1
+        except Exception:
+            pass
+
+    return {
+        "revenue": revenue, "revenue_prev": revenue_prev, "revenue_yoy": revenue_yoy, "revenue_cagr3y": revenue_cagr,
+        "gross_margin": gross_margin, "operating_margin": operating_margin, "net_margin": net_margin,
+        "gross_margin_chg": gm_chg, "operating_margin_chg": om_chg, "net_margin_chg": nm_chg,
+        "fcf": fcf, "fcf_margin": fcf_margin, "ocf": op_cash_flow, "capex": capex_val,
+        "current_ratio": current_ratio, "quick_ratio": quick_ratio,
+        "debt_total": total_debt, "debt_to_equity": d_to_e,
+        "roe": roe, "roa": roa, "interest_coverage": icov,
+        "assets": total_assets, "equity": equity
+    }
+
+def interpret_statement_metrics(m: Dict[str, float]) -> List[str]:
+    """Plain-English narrative tying statements to fundamentals."""
+    out = []
+
+    # Growth
+    y = m.get("revenue_yoy")
+    c = m.get("revenue_cagr3y")
+    if not np.isnan(y):
+        if y > 0.1: out.append(f"**Top-line growth:** Revenue grew ~{y*100:.1f}% YoY (strong momentum).")
+        elif y > 0.0: out.append(f"**Top-line growth:** Revenue grew ~{y*100:.1f}% YoY (modest).")
+        else: out.append(f"**Top-line growth:** Revenue declined ~{abs(y)*100:.1f}% YoY (headwind).")
+    if not np.isnan(c):
+        if c > 0.1: out.append(f"**Multi-year growth:** ~{c*100:.1f}% CAGR over ~3 years.")
+        elif c > 0.0: out.append(f"**Multi-year growth:** ~{c*100:.1f}% CAGR (slow but positive).")
+        else: out.append("**Multi-year growth:** roughly flat/negative over ~3 years.")
+
+    # Margins & profitability
+    gm, om, nm = m.get("gross_margin"), m.get("operating_margin"), m.get("net_margin")
+    if not np.isnan(gm):
+        qual = "high" if gm >= 0.5 else "mid" if gm >= 0.3 else "low"
+        out.append(f"**Gross margin:** {gm*100:.1f}% ({qual} structural margin).")
+    if not np.isnan(om):
+        if om >= 0.2: lvl="excellent"
+        elif om >= 0.1: lvl="healthy"
+        elif om >= 0.0: lvl="thin"
+        else: lvl="negative"
+        out.append(f"**Operating margin:** {om*100:.1f}% ({lvl}).")
+    if not np.isnan(nm):
+        out.append(f"**Net margin:** {nm*100:.1f}%.")
+
+    for nm_key, label in [("gross_margin_chg","gross"),("operating_margin_chg","operating"),("net_margin_chg","net")]:
+        delta = m.get(nm_key)
+        if not np.isnan(delta):
+            if abs(delta) >= 0.02:
+                out.append(f"**{label.title()} margin trend:** {('expanding' if delta>0 else 'contracting')} ~{abs(delta)*100:.1f} pp YoY.")
+
+    # Cash flow quality
+    fcfm = m.get("fcf_margin")
+    if not np.isnan(fcfm):
+        if fcfm >= 0.10: txt="strong free-cash-flow generation"
+        elif fcfm >= 0.0: txt="modest free-cash-flow generation"
+        else: txt="negative free cash flow (investment/pressure)"
+        out.append(f"**FCF margin:** {fcfm*100:.1f}% — {txt}.")
+
+    # Liquidity
+    cr, qr = m.get("current_ratio"), m.get("quick_ratio")
+    if not np.isnan(cr):
+        if cr >= 2.0: s="strong"
+        elif cr >= 1.0: s="adequate"
+        else: s="tight"
+        out.append(f"**Liquidity:** current ratio {cr:.2f} ({s}).")
+    if not np.isnan(qr):
+        out.append(f"**Quick ratio:** {qr:.2f}.")
+
+    # Leverage
+    de = m.get("debt_to_equity")
+    if not np.isnan(de):
+        if de <= 0.5: s="conservative"
+        elif de <= 1.5: s="moderate"
+        else: s="high"
+        out.append(f"**Leverage:** Debt/Equity ≈ {de:.2f} ({s}).")
+
+    ic = m.get("interest_coverage")
+    if not np.isnan(ic):
+        if ic >= 6: s="comfortable"
+        elif ic >= 2: s="manageable"
+        else: s="stressed"
+        out.append(f"**Interest coverage:** ~{ic:.1f}× ({s}).")
+
+    # Returns
+    for k, nm in [("roe","ROE"),("roa","ROA")]:
+        v = m.get(k)
+        if not np.isnan(v):
+            out.append(f"**{nm}:** {v*100:.1f}%.")
+
+    return out
+
+def tidy_statement_for_display(df: pd.DataFrame, take: int = 4) -> pd.DataFrame:
+    """Return the last `take` periods, columns -> most recent right, nicely labeled."""
+    if df is None or df.empty: return pd.DataFrame()
+    out = df.copy()
+    # ensure datetime-like columns if possible
+    try:
+        out.columns = pd.to_datetime(out.columns)
+        out = out.sort_index(axis=1)
+    except Exception:
+        pass
+    out = out.iloc[:, -take:]
+    # make column headers friendlier
+    new_cols = []
+    for c in out.columns:
+        try:
+            new_cols.append(str(pd.to_datetime(c).date()))
+        except Exception:
+            new_cols.append(str(c))
+    out.columns = new_cols
+    return out

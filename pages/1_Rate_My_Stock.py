@@ -1,24 +1,29 @@
-# pages/1_Rate_My_Stock.py
 import io
+import time
 import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
+
 from app_utils import (
     inject_css, brand_header, yf_symbol, ema, rsi, macd,
     zscore_series, percentile_rank, fetch_prices_chunked_with_fallback,
     fetch_fundamentals_simple, technical_scores, fetch_vix_series, macro_from_vix,
-    fundamentals_interpretation, build_universe
+    fundamentals_interpretation, build_universe,
+    # NEW:
+    fetch_company_statements, statement_metrics, interpret_statement_metrics,
+    tidy_statement_for_display, _CURRENCY_SYMBOL
 )
 
-st.set_page_config(page_title="Rate My Stock", layout="wide")
+st.set_page_config(page_title="Rate My — Stock", layout="wide")
 inject_css()
 brand_header("Rate My Stock")
 
+# -------------------- Inputs --------------------
 c_in_left, c_in_mid, c_in_right = st.columns([1,2,1])
 with c_in_mid:
     ticker = st.text_input(" ", "AAPL", label_visibility="collapsed",
-                           placeholder="Type a ticker (e.g., AAPL)", key="ticker_in")
+                           placeholder="Type a ticker (e.g., AAPL)")
 
 with st.expander("Advanced settings", expanded=False):
     c1,c2,c3 = st.columns(3)
@@ -43,6 +48,7 @@ if not user_tickers:
     st.info("Enter a ticker above to run the rating.")
     st.stop()
 
+# -------------------- Pipeline --------------------
 with st.status("Crunching the numbers…", expanded=True) as status:
     prog = st.progress(0)
 
@@ -54,12 +60,13 @@ with st.status("Crunching the numbers…", expanded=True) as status:
     status.update(label="Downloading prices (chunked + retries)…")
     prices, ok = fetch_prices_chunked_with_fallback(
         universe, period=history, interval="1d",
-        chunk=25, retries=3, sleep_between=0.35, singles_pause=0.20
+        chunk=20, retries=4, sleep_between=1.0, singles_pause=1.1
     )
     if not ok:
-        st.error("No peer prices loaded."); st.stop()
+        st.error("No peer prices loaded.")
+        st.stop()
     panel = {t: prices[t].dropna() for t in ok if t in prices.columns and prices[t].dropna().size>0}
-    prog.progress(50)
+    prog.progress(45)
 
     status.update(label="Computing technicals…")
     tech = technical_scores(panel)
@@ -67,18 +74,20 @@ with st.status("Crunching the numbers…", expanded=True) as status:
         if col in tech.columns:
             tech[f"{col}_z"] = zscore_series(tech[col])
     TECH_score = tech[[c for c in ["dma_gap_z","macd_hist_z","rsi_strength_z","mom12m_z"] if c in tech.columns]].mean(axis=1)
-    prog.progress(75)
+    prog.progress(65)
 
     status.update(label="Fetching fundamentals…")
     fund_raw = fetch_fundamentals_simple(list(panel.keys()))
     fdf = pd.DataFrame(index=fund_raw.index)
     for col in ["revenueGrowth","earningsGrowth","returnOnEquity","profitMargins",
                 "grossMargins","operatingMargins","ebitdaMargins"]:
-        if col in fund_raw.columns: fdf[f"{col}_z"] = zscore_series(fund_raw[col])
+        if col in fund_raw.columns:
+            fdf[f"{col}_z"] = zscore_series(fund_raw[col])
     for col in ["trailingPE","forwardPE","debtToEquity"]:
-        if col in fund_raw.columns: fdf[f"{col}_z"] = zscore_series(-fund_raw[col])
+        if col in fund_raw.columns:
+            fdf[f"{col}_z"] = zscore_series(-fund_raw[col])
     FUND_score = fdf.mean(axis=1) if len(fdf.columns) else pd.Series(0.0, index=fund_raw.index)
-    prog.progress(92)
+    prog.progress(85)
 
     status.update(label="Assessing macro regime…")
     vix_series = fetch_vix_series(period="6mo", interval="1d")
@@ -106,6 +115,7 @@ out["RECO"] = out["RATING_0_100"].apply(
 
 # 5Y momentum for SHOWN tickers only (quietly)
 show_idx = [t for t in user_tickers if t in out.index]
+tech = tech.copy()
 for t in show_idx:
     try:
         px5 = yf.Ticker(t).history(period="5y", interval="1d")["Close"].dropna()
@@ -125,8 +135,8 @@ pretty = table.rename(columns={
 })
 st.dataframe(pretty.round(4), use_container_width=True)
 
+# -------------------- Per-ticker deep dive --------------------
 st.markdown("## 🔎 Why this rating?")
-all_rows=[]
 for t in show_idx:
     reco = table.loc[t,"RECO"]; sc = table.loc[t,"RATING_0_100"]
     with st.expander(f"{t} — {reco} (Score: {sc:.1f})", expanded=True):
@@ -136,6 +146,7 @@ for t in show_idx:
         c2.markdown(f'<div class="kpi-card"><div>Technicals</div><div class="kpi-num">{table.loc[t,"TECH_score"]:.3f}</div></div>', unsafe_allow_html=True)
         c3.markdown(f'<div class="kpi-card"><div>Macro (VIX)</div><div class="kpi-num">{table.loc[t,"MACRO_score"]:.3f}</div></div>', unsafe_allow_html=True)
 
+        # Fundamentals table
         st.markdown("#### Fundamentals — peer-relative z-scores")
         fshow = pd.DataFrame({
             "Revenue growth (z)": fdf.loc[t, "revenueGrowth_z"] if "revenueGrowth_z" in fdf.columns else np.nan,
@@ -155,6 +166,7 @@ for t in show_idx:
         lines = fundamentals_interpretation(fdf.loc[t] if t in fdf.index else pd.Series(dtype=float))
         for L in lines: st.markdown(f"- {L}")
 
+        # Technicals table
         st.markdown("#### Technicals")
         rsi_val = np.nan
         if (t in tech.index) and ("rsi_strength" in tech.columns) and pd.notna(tech.loc[t,"rsi_strength"]):
@@ -184,6 +196,7 @@ for t in show_idx:
         if notes:
             st.markdown("- " + "\n- ".join(notes))
 
+        # Macro
         st.markdown("#### Macro (VIX) — level & trend")
         if not np.isnan(vix_last):
             m1,m2,m3 = st.columns(3)
@@ -201,7 +214,105 @@ for t in show_idx:
         else:
             st.info("VIX unavailable — Macro defaults to neutral.")
 
-        # Per-ticker export
+        # -------------------- NEW: Financial Statements & Interpretation --------------------
+        st.markdown("---")
+        st.markdown("### 📑 Financial statements & interpretation")
+
+        stmts = fetch_company_statements(t)
+        cur_code = stmts.get("currency") or "USD"
+        cur_sym  = _CURRENCY_SYMBOL.get(cur_code, cur_code)
+
+        freq = st.radio(f"{t}: Statement frequency", ["Annual","Quarterly"], horizontal=True, key=f"freq_{t}")
+        if freq == "Annual":
+            inc, bs, cf = stmts["income"], stmts["balance"], stmts["cashflow"]
+            take_annual = 4
+            inc_d = tidy_statement_for_display(inc, take_annual)
+            bs_d  = tidy_statement_for_display(bs,  take_annual)
+            cf_d  = tidy_statement_for_display(cf,  take_annual)
+        else:
+            inc, bs, cf = stmts["income_q"], stmts["balance_q"], stmts["cashflow_q"]
+            take_q = 8
+            inc_d = tidy_statement_for_display(inc, take_q)
+            bs_d  = tidy_statement_for_display(bs,  take_q)
+            cf_d  = tidy_statement_for_display(cf,  take_q)
+
+        # Scale to nice units for display
+        inc_d, inc_unit = (inc_d/1, "")
+        bs_d,  bs_unit  = (bs_d/1, "")
+        cf_d,  cf_unit  = (cf_d/1, "")
+        # Auto scale per table
+        def _auto(df):
+            if df is None or df.empty: return df, ""
+            vals = pd.to_numeric(df.replace([np.inf,-np.inf], np.nan).stack(), errors="coerce").dropna()
+            if vals.empty: return df, ""
+            med = np.nanmedian(np.abs(vals))
+            if med >= 1e9: return (df/1e9).round(2), " (billions)"
+            if med >= 1e6: return (df/1e6).round(2), " (millions)"
+            if med >= 1e3: return (df/1e3).round(2), " (thousands)"
+            return df.round(2), ""
+        inc_d, inc_unit = _auto(inc_d)
+        bs_d,  bs_unit  = _auto(bs_d)
+        cf_d,  cf_unit  = _auto(cf_d)
+
+        tabs = st.tabs(["Income Statement", "Balance Sheet", "Cash Flow", "Key ratios", "Narrative"])
+        with tabs[0]:
+            st.caption(f"Currency: **{cur_sym} {cur_code}** • Units: {inc_unit or 'raw'}")
+            st.dataframe(inc_d, use_container_width=True)
+        with tabs[1]:
+            st.caption(f"Currency: **{cur_sym} {cur_code}** • Units: {bs_unit or 'raw'}")
+            st.dataframe(bs_d, use_container_width=True)
+        with tabs[2]:
+            st.caption(f"Currency: **{cur_sym} {cur_code}** • Units: {cf_unit or 'raw'}")
+            st.dataframe(cf_d, use_container_width=True)
+        with tabs[3]:
+            met = statement_metrics(stmts)
+            ratios = pd.DataFrame({
+                "Revenue (last)": [met.get("revenue")],
+                "Revenue YoY": [met.get("revenue_yoy")],
+                "Revenue CAGR (3y)": [met.get("revenue_cagr3y")],
+                "Gross margin": [met.get("gross_margin")],
+                "Operating margin": [met.get("operating_margin")],
+                "Net margin": [met.get("net_margin")],
+                "FCF margin": [met.get("fcf_margin")],
+                "Current ratio": [met.get("current_ratio")],
+                "Quick ratio": [met.get("quick_ratio")],
+                "Debt/Equity": [met.get("debt_to_equity")],
+                "Interest coverage (EBIT/Int)": [met.get("interest_coverage")],
+                "ROE": [met.get("roe")],
+                "ROA": [met.get("roa")],
+            }).T.rename(columns={0:"value"})
+            # pretty formatting
+            def fmt(x, pct=False):
+                if x is None or np.isnan(x): return "—"
+                return f"{x*100:.1f}%" if pct else f"{x:,.2f}"
+            pretty_ratios = pd.DataFrame({
+                "value": [
+                    fmt(met.get("revenue"), pct=False),
+                    fmt(met.get("revenue_yoy"), pct=True),
+                    fmt(met.get("revenue_cagr3y"), pct=True),
+                    fmt(met.get("gross_margin"), pct=True),
+                    fmt(met.get("operating_margin"), pct=True),
+                    fmt(met.get("net_margin"), pct=True),
+                    fmt(met.get("fcf_margin"), pct=True),
+                    fmt(met.get("current_ratio"), pct=False),
+                    fmt(met.get("quick_ratio"), pct=False),
+                    fmt(met.get("debt_to_equity"), pct=False),
+                    fmt(met.get("interest_coverage"), pct=False),
+                    fmt(met.get("roe"), pct=True),
+                    fmt(met.get("roa"), pct=True),
+                ]
+            }, index=ratios.index)
+            st.dataframe(pretty_ratios, use_container_width=True)
+
+        with tabs[4]:
+            met = statement_metrics(stmts)
+            bullets = interpret_statement_metrics(met)
+            st.markdown("> These points summarize what the **financial statements** say about growth, profitability, "
+                        "cash generation, liquidity, and leverage — which underpin your **Fundamentals** score.")
+            for b in bullets:
+                st.markdown(f"- {b}")
+
+        # Per-ticker CSV export (unchanged)
         row = {
             "ticker": t,
             "fundamentals_score": float(table.loc[t, "FUND_score"]),
@@ -216,20 +327,15 @@ for t in show_idx:
                            data=export_df.to_csv(index=False).encode(),
                            file_name=f"{t}_breakdown.csv", mime="text/csv", use_container_width=True)
 
-        # Charts
-        try:
-            px2 = yf.Ticker(t).history(period="2y", interval="1d")["Close"].dropna()
-            if px2.size > 0:
-                series = px2
-            else:
-                series = panel[t]
-        except Exception:
-            series = panel[t] if t in panel else None
-
-        if series is not None and not series.empty:
+        # Charts (unchanged)
+        def draw_stock_charts(series: pd.Series):
+            if series is None or series.empty:
+                st.info("Not enough history to show charts.")
+                return
             st.subheader("📈 Price & EMAs")
             e20, e50 = ema(series,20), ema(series,50)
-            st.line_chart(pd.DataFrame({"Close": series, "EMA20": e20, "EMA50": e50}), use_container_width=True)
+            price_df = pd.DataFrame({"Close": series, "EMA20": e20, "EMA50": e50})
+            st.line_chart(price_df, use_container_width=True)
             st.caption("If price is **above EMA50/EMA20**, trend bias is positive; **below** suggests a headwind.")
 
             st.subheader("📉 MACD")
@@ -247,20 +353,15 @@ for t in show_idx:
                 mom12 = series/series.shift(253)-1.0
                 st.line_chart(pd.DataFrame({"12m momentum": mom12}), use_container_width=True)
                 st.caption("Positive vs one year ago → outperformance; negative → underperformance.")
+            else:
+                st.info("Need > 1 year of data to show the 12-month momentum line.")
 
-        all_rows.append(row)
-
-if all_rows:
-    df_all = pd.DataFrame(all_rows)
-    st.markdown("### Export all shown tickers")
-    st.download_button("⬇️ Download all (CSV)",
-                       data=df_all.to_csv(index=False).encode(),
-                       file_name="stock_breakdowns.csv", mime="text/csv", use_container_width=True)
-    xlsx_all = io.BytesIO()
-    with pd.ExcelWriter(xlsx_all, engine="openpyxl") as w:
-        df_all.to_excel(w, index=False, sheet_name="Breakdowns")
-    st.download_button("⬇️ Download all (Excel)",
-                       data=xlsx_all.getvalue(),
-                       file_name="stock_breakdowns.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                       use_container_width=True)
+        try:
+            px2 = yf.Ticker(t).history(period="2y", interval="1d")["Close"].dropna()
+            if px2.size > 0:
+                draw_stock_charts(px2)
+            elif t in panel:
+                draw_stock_charts(panel[t])
+        except Exception:
+            if t in panel:
+                draw_stock_charts(panel[t])
