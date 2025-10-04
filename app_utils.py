@@ -1,7 +1,7 @@
 # app_utils.py — shared utilities for Rate My (Stock + Portfolio + Tracker)
 # UI (CSS/brand), peer universes (via indices.py or snapshot), robust price loader,
 # features (technicals/macro), fundamentals fetch, interpretations, portfolio editor helpers,
-# + NEW: company financial statements, key ratios, and narrative interpretation.
+# + company financial statements, key ratios, and narrative interpretation.
 
 import os
 import re
@@ -560,7 +560,7 @@ def holdings_editor_form(currency_symbol: str, total_value: float) -> Tuple[pd.D
     df_hold = pd.DataFrame({"ticker": out["ticker"], "weight": w})
     return df_hold, current
 
-# ==========================  NEW: Company financial statements ==========================
+# ==========================  Company financial statements ==========================
 
 _CURRENCY_SYMBOL = {
     "USD": "$", "EUR": "€", "GBP": "£", "JPY": "¥", "CAD": "C$", "AUD": "A$", "CHF": "CHF",
@@ -588,13 +588,10 @@ def _pick(df: pd.DataFrame, candidates: List[str]) -> Optional[pd.Series]:
 def _clean_statement(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or isinstance(df, float): return pd.DataFrame()
     if df.empty: return pd.DataFrame()
-    # yfinance statements: rows = line items, cols = period end dates
     out = df.copy()
     out = out[~out.index.duplicated(keep="first")]
-    # ensure numeric
     for c in out.columns:
         out[c] = pd.to_numeric(out[c], errors="coerce")
-    # sort columns ascending by date if possible
     try:
         out.columns = pd.to_datetime(out.columns)
         out = out.sort_index(axis=1)
@@ -654,8 +651,6 @@ def statement_metrics(stmts: Dict[str, object]) -> Dict[str, float]:
     gross = _pick(inc, ["Gross Profit"])
     opinc = _pick(inc, ["Operating Income","Operating Profit","Ebit"])
     net   = _pick(inc, ["Net Income","Net Income Applicable To Common Shares","Net Income Common Stockholders"])
-    cogs  = _pick(inc, ["Cost Of Revenue","Cost of Goods Sold"])
-    tax   = _pick(inc, ["Income Tax Expense"])
     intr  = _pick(inc, ["Interest Expense","Interest Expense Non Operating"])
 
     ta    = _pick(bs,  ["Total Assets"])
@@ -671,10 +666,10 @@ def statement_metrics(stmts: Dict[str, object]) -> Dict[str, float]:
     ocf   = _pick(cf,  ["Total Cash From Operating Activities","Operating Cash Flow"])
     capex = _pick(cf,  ["Capital Expenditures","Investments In Property Plant And Equipment"])
 
-    def last(series): 
-        return (series.dropna().iloc[-1] if series is not None and series.dropna().size else np.nan)
+    def last(series):
+        return (series.dropna().iloc[-1] if series is not None and isinstance(series, pd.Series) and series.dropna().size else np.nan)
     def prev(series):
-        return (series.dropna().iloc[-2] if series is not None and series.dropna().size>1 else np.nan)
+        return (series.dropna().iloc[-2] if series is not None and isinstance(series, pd.Series) and series.dropna().size>1 else np.nan)
 
     revenue      = float(last(rev))
     revenue_prev = float(prev(rev))
@@ -684,17 +679,27 @@ def statement_metrics(stmts: Dict[str, object]) -> Dict[str, float]:
     interest_exp = abs(float(last(intr))) if not np.isnan(last(intr)) else np.nan
 
     total_assets = float(last(ta))
-    equity       = float(last(teq)) if not np.isnan(last(teq)).any() if isinstance(teq, pd.Series) else float(last(teq))
-    if np.isnan(equity):
-        equity = float(last(ta)) - float(last(tliab)) if not (np.isnan(last(ta)) or np.isnan(last(tliab))) else np.nan
 
-    current_assets     = float(last(ca))
-    current_liabilities= float(last(cl))
-    inventory          = float(last(inv))
-    lt_debt            = float(last(ltd))
-    st_debt            = float(last(std))
-    notes_pay          = float(last(notes))
-    total_debt         = np.nansum([lt_debt, st_debt, notes_pay])
+    # ---- FIXED: safer equity extraction (no nested ternary) ----
+    equity = np.nan
+    if isinstance(teq, pd.Series):
+        eq_last = last(teq)
+        equity = float(eq_last) if not np.isnan(eq_last) else np.nan
+    else:
+        equity = float(last(teq))
+
+    if np.isnan(equity):
+        ta_last, tl_last = last(ta), last(tliab)
+        if not np.isnan(ta_last) and not np.isnan(tl_last):
+            equity = float(ta_last - tl_last)
+
+    current_assets      = float(last(ca))
+    current_liabilities = float(last(cl))
+    inventory           = float(last(inv))
+    lt_debt             = float(last(ltd))
+    st_debt             = float(last(std))
+    notes_pay           = float(last(notes))
+    total_debt          = np.nansum([lt_debt, st_debt, notes_pay])
 
     op_cash_flow = float(last(ocf))
     capex_val    = float(last(capex))
@@ -729,13 +734,13 @@ def statement_metrics(stmts: Dict[str, object]) -> Dict[str, float]:
             pass
         return np.nan, np.nan
 
-    gm, gm_chg = _ratio_yoy(gross, rev)
-    om, om_chg = _ratio_yoy(opinc, rev)
-    nm, nm_chg = _ratio_yoy(net, rev)
+    _, gm_chg = _ratio_yoy(gross, rev)
+    _, om_chg = _ratio_yoy(opinc, rev)
+    _, nm_chg = _ratio_yoy(net, rev)
 
     # 3Y revenue CAGR
     revenue_cagr = np.nan
-    if rev is not None and rev.dropna().size >= 4:
+    if isinstance(rev, pd.Series) and rev.dropna().size >= 4:
         try:
             v0 = float(rev.dropna().iloc[-4])
             v1 = float(rev.dropna().iloc[-1])
@@ -787,9 +792,8 @@ def interpret_statement_metrics(m: Dict[str, float]) -> List[str]:
 
     for nm_key, label in [("gross_margin_chg","gross"),("operating_margin_chg","operating"),("net_margin_chg","net")]:
         delta = m.get(nm_key)
-        if not np.isnan(delta):
-            if abs(delta) >= 0.02:
-                out.append(f"**{label.title()} margin trend:** {('expanding' if delta>0 else 'contracting')} ~{abs(delta)*100:.1f} pp YoY.")
+        if not np.isnan(delta) and abs(delta) >= 0.02:
+            out.append(f"**{label.title()} margin trend:** {('expanding' if delta>0 else 'contracting')} ~{abs(delta)*100:.1f} pp YoY.")
 
     # Cash flow quality
     fcfm = m.get("fcf_margin")
@@ -836,14 +840,12 @@ def tidy_statement_for_display(df: pd.DataFrame, take: int = 4) -> pd.DataFrame:
     """Return the last `take` periods, columns -> most recent right, nicely labeled."""
     if df is None or df.empty: return pd.DataFrame()
     out = df.copy()
-    # ensure datetime-like columns if possible
     try:
         out.columns = pd.to_datetime(out.columns)
         out = out.sort_index(axis=1)
     except Exception:
         pass
     out = out.iloc[:, -take:]
-    # make column headers friendlier
     new_cols = []
     for c in out.columns:
         try:
