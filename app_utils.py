@@ -1,7 +1,8 @@
 # app_utils.py — shared utilities for Rate My (Stock + Portfolio + Tracker)
 # UI (CSS/brand), peer universes (via indices.py or snapshot), robust price loader,
 # features (technicals/macro), fundamentals fetch, interpretations, portfolio editor helpers,
-# + company financial statements, key ratios, and narrative interpretation.
+# + company financial statements, key ratios, narrative interpretation, and
+# ***canonical ordering*** for Income/Balance/Cashflow statements.
 
 import os
 import re
@@ -640,13 +641,13 @@ def _scale_unit(df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
         return (df / 1e3).round(2), " (thousands)"
     return df.round(2), ""
 
+# ---------- Statement metrics & narrative (unchanged logic, with safe equity) ----------
+
 def statement_metrics(stmts: Dict[str, object]) -> Dict[str, float]:
-    """Compute key ratios/trends from statements (annual preferred)."""
     inc = stmts.get("income", pd.DataFrame())
     bs  = stmts.get("balance", pd.DataFrame())
     cf  = stmts.get("cashflow", pd.DataFrame())
 
-    # helpers
     rev   = _pick(inc, ["Total Revenue","Revenue","Sales"])
     gross = _pick(inc, ["Gross Profit"])
     opinc = _pick(inc, ["Operating Income","Operating Profit","Ebit"])
@@ -680,14 +681,12 @@ def statement_metrics(stmts: Dict[str, object]) -> Dict[str, float]:
 
     total_assets = float(last(ta))
 
-    # ---- FIXED: safer equity extraction (no nested ternary) ----
     equity = np.nan
     if isinstance(teq, pd.Series):
         eq_last = last(teq)
         equity = float(eq_last) if not np.isnan(eq_last) else np.nan
     else:
         equity = float(last(teq))
-
     if np.isnan(equity):
         ta_last, tl_last = last(ta), last(tliab)
         if not np.isnan(ta_last) and not np.isnan(tl_last):
@@ -705,24 +704,20 @@ def statement_metrics(stmts: Dict[str, object]) -> Dict[str, float]:
     capex_val    = float(last(capex))
     fcf          = op_cash_flow - (capex_val if not np.isnan(capex_val) else 0.0)
 
-    # margins & growth
     gross_margin      = (gross_profit/revenue) if revenue else np.nan
     operating_margin  = (operating_inc/revenue) if revenue else np.nan
     net_margin        = (net_income/revenue) if revenue else np.nan
     fcf_margin        = (fcf/revenue) if revenue else np.nan
     revenue_yoy       = (revenue/revenue_prev - 1.0) if (revenue_prev and not np.isnan(revenue_prev)) else np.nan
 
-    # liquidity
     current_ratio = (current_assets/current_liabilities) if current_liabilities else np.nan
     quick_ratio   = ((current_assets - (inventory if not np.isnan(inventory) else 0.0)) / current_liabilities) if current_liabilities else np.nan
 
-    # leverage & returns
     d_to_e   = (total_debt/equity) if equity else np.nan
     roe      = (net_income/equity) if equity else np.nan
     roa      = (net_income/total_assets) if total_assets else np.nan
     icov     = (operating_inc/interest_exp) if interest_exp and not np.isnan(operating_inc) else np.nan
 
-    # margin trends (YoY)
     def _ratio_yoy(series_num, series_den):
         try:
             n0, n1 = float(last(series_num)), float(prev(series_num))
@@ -738,7 +733,6 @@ def statement_metrics(stmts: Dict[str, object]) -> Dict[str, float]:
     _, om_chg = _ratio_yoy(opinc, rev)
     _, nm_chg = _ratio_yoy(net, rev)
 
-    # 3Y revenue CAGR
     revenue_cagr = np.nan
     if isinstance(rev, pd.Series) and rev.dropna().size >= 4:
         try:
@@ -761,10 +755,8 @@ def statement_metrics(stmts: Dict[str, object]) -> Dict[str, float]:
     }
 
 def interpret_statement_metrics(m: Dict[str, float]) -> List[str]:
-    """Plain-English narrative tying statements to fundamentals."""
     out = []
 
-    # Growth
     y = m.get("revenue_yoy")
     c = m.get("revenue_cagr3y")
     if not np.isnan(y):
@@ -776,7 +768,6 @@ def interpret_statement_metrics(m: Dict[str, float]) -> List[str]:
         elif c > 0.0: out.append(f"**Multi-year growth:** ~{c*100:.1f}% CAGR (slow but positive).")
         else: out.append("**Multi-year growth:** roughly flat/negative over ~3 years.")
 
-    # Margins & profitability
     gm, om, nm = m.get("gross_margin"), m.get("operating_margin"), m.get("net_margin")
     if not np.isnan(gm):
         qual = "high" if gm >= 0.5 else "mid" if gm >= 0.3 else "low"
@@ -795,7 +786,6 @@ def interpret_statement_metrics(m: Dict[str, float]) -> List[str]:
         if not np.isnan(delta) and abs(delta) >= 0.02:
             out.append(f"**{label.title()} margin trend:** {('expanding' if delta>0 else 'contracting')} ~{abs(delta)*100:.1f} pp YoY.")
 
-    # Cash flow quality
     fcfm = m.get("fcf_margin")
     if not np.isnan(fcfm):
         if fcfm >= 0.10: txt="strong free-cash-flow generation"
@@ -803,7 +793,6 @@ def interpret_statement_metrics(m: Dict[str, float]) -> List[str]:
         else: txt="negative free cash flow (investment/pressure)"
         out.append(f"**FCF margin:** {fcfm*100:.1f}% — {txt}.")
 
-    # Liquidity
     cr, qr = m.get("current_ratio"), m.get("quick_ratio")
     if not np.isnan(cr):
         if cr >= 2.0: s="strong"
@@ -813,7 +802,6 @@ def interpret_statement_metrics(m: Dict[str, float]) -> List[str]:
     if not np.isnan(qr):
         out.append(f"**Quick ratio:** {qr:.2f}.")
 
-    # Leverage
     de = m.get("debt_to_equity")
     if not np.isnan(de):
         if de <= 0.5: s="conservative"
@@ -828,17 +816,213 @@ def interpret_statement_metrics(m: Dict[str, float]) -> List[str]:
         else: s="stressed"
         out.append(f"**Interest coverage:** ~{ic:.1f}× ({s}).")
 
-    # Returns
-    for k, nm in [("roe","ROE"),("roa","ROA")]:
+    for k, nmv in [("roe","ROE"),("roa","ROA")]:
         v = m.get(k)
         if not np.isnan(v):
-            out.append(f"**{nm}:** {v*100:.1f}%.")
+            out.append(f"**{nmv}:** {v*100:.1f}%.")
 
     return out
 
-def tidy_statement_for_display(df: pd.DataFrame, take: int = 4) -> pd.DataFrame:
-    """Return the last `take` periods, columns -> most recent right, nicely labeled."""
+# ==========================  Canonical ordering of statements  ==========================
+
+def _find_label(df: pd.DataFrame, synonyms: List[str]) -> Optional[str]:
+    """Return the actual row label in df that matches any of the synonyms."""
+    if df is None or df.empty: return None
+    norm_index = { _norm_rowname(idx): idx for idx in df.index.astype(str) }
+    # exact normalized match first
+    for s in synonyms:
+        key = _norm_rowname(s)
+        if key in norm_index:
+            return norm_index[key]
+    # contains fallback
+    for s in synonyms:
+        key = _norm_rowname(s)
+        for k, orig in norm_index.items():
+            if key in k:
+                return orig
+    return None
+
+def _order_from_synonyms(df: pd.DataFrame, blocks: List[List[List[str]]]) -> pd.DataFrame:
+    """
+    blocks: list of sections; each section is a list of synonym lists.
+    e.g., for income:
+      [
+        [ ["Total Revenue","Revenue","Sales"],
+          ["Cost Of Revenue","Cost of Goods Sold"] ,
+          ["Gross Profit"] ],
+        [ ["Research Development","R&D"], ["Selling General Administrative","SG&A"], ... ],
+        ...
+      ]
+    """
     if df is None or df.empty: return pd.DataFrame()
+
+    used = []
+    ordered_labels = []
+
+    for section in blocks:
+        for syns in section:
+            lbl = _find_label(df, syns)
+            if lbl and lbl not in used:
+                ordered_labels.append(lbl)
+                used.append(lbl)
+
+    # append remaining original rows (preserve original order)
+    remaining = [idx for idx in df.index if idx not in used]
+    ordered_labels.extend(remaining)
+
+    out = df.loc[ordered_labels]
+    return out
+
+def order_income_statement(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Textbook order:
+      Revenue → COGS → Gross Profit → R&D → SG&A → Other OpEx → Operating Income
+      → Interest Expense → Other Income/Expense → Pretax Income → Income Tax → Net Income
+    """
+    df = _clean_statement(df_raw)
+    if df.empty: return df
+
+    blocks = [
+        [ # Top-line
+          ["Total Revenue","Revenue","Sales","Total Sales","Operating Revenue"]
+        ],
+        [ # Costs and gross
+          ["Cost Of Revenue","Cost of Goods Sold","Cost Of Goods And Services Sold"],
+          ["Gross Profit","Gross Income"]
+        ],
+        [ # Operating expenses
+          ["Research Development","R&D"],
+          ["Selling General Administrative","SG&A","Selling General And Administrative"],
+          ["Other Operating Expenses","Other Operating Expense","Operating Expense","Operating Expenses"],
+        ],
+        [ # Operating income
+          ["Operating Income","Operating Profit","Ebit","EBIT"]
+        ],
+        [ # Below-operating
+          ["Interest Expense","Interest Expense Non Operating","Interest Expense Net"],
+          ["Other Income Net","Other Income (Expense) Net","Other Non Operating Income (Expenses)"],
+          ["Pretax Income","Income Before Tax","Earnings Before Tax","Pre-Tax Income"]
+        ],
+        [ # Tax & bottom line
+          ["Income Tax Expense","Provision For Income Taxes","Tax Provision"],
+          ["Net Income","Net Income Applicable To Common Shares","Net Income Common Stockholders","Net Income From Continuing Ops"]
+        ],
+        [ # Per-share (optional; will be appended if present)
+          ["Diluted EPS","Diluted EPS Net Income","EPS (Diluted)","EPS Diluted"],
+          ["Basic EPS","Basic EPS Net Income","EPS (Basic)","EPS Basic"]
+        ],
+    ]
+
+    # If Gross Profit is missing but Revenue/COGS exist, compute and insert.
+    rev_lbl = _find_label(df, ["Total Revenue","Revenue","Sales","Total Sales"])
+    cogs_lbl = _find_label(df, ["Cost Of Revenue","Cost of Goods Sold","Cost Of Goods And Services Sold"])
+    gp_lbl = _find_label(df, ["Gross Profit","Gross Income"])
+    if not gp_lbl and rev_lbl and cogs_lbl:
+        df = df.copy()
+        df.loc["Gross Profit (computed)"] = (pd.to_numeric(df.loc[rev_lbl], errors="coerce")
+                                             - pd.to_numeric(df.loc[cogs_lbl], errors="coerce"))
+
+    return _order_from_synonyms(df, blocks)
+
+def order_balance_sheet(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Assets → Liabilities → Equity order, with current/non-current grouping where possible.
+    """
+    df = _clean_statement(df_raw)
+    if df.empty: return df
+
+    blocks = [
+        [ # Current assets
+          ["Cash And Cash Equivalents","Cash"],
+          ["Short Term Investments","Short-Term Investments"],
+          ["Accounts Receivable","Net Receivables","Receivables"],
+          ["Inventory"],
+          ["Other Current Assets"],
+          ["Total Current Assets"]
+        ],
+        [ # Non-current assets
+          ["Property Plant Equipment","Property Plant And Equipment","Net PPE"],
+          ["Goodwill"],
+          ["Intangible Assets"],
+          ["Long Term Investments"],
+          ["Other Assets","Other Non Current Assets"],
+          ["Total Assets"]
+        ],
+        [ # Current liabilities
+          ["Accounts Payable"],
+          ["Short Long Term Debt","Short-Term Debt","Current Portion of Long Term Debt"],
+          ["Other Current Liabilities"],
+          ["Total Current Liabilities"]
+        ],
+        [ # Non-current liabilities
+          ["Long Term Debt"],
+          ["Other Liabilities","Other Non Current Liabilities"],
+          ["Total Liab","Total Liabilities"]
+        ],
+        [ # Equity
+          ["Common Stock","Common Stock Total Equity"],
+          ["Retained Earnings","Retained Earnings (Accumulated Deficit)"],
+          ["Accumulated Other Comprehensive Income (Loss)","AOCI"],
+          ["Total Stockholder Equity","Total Shareholder Equity","Total Equity"],
+          ["Total Liabilities & Stockholders Equity","Total Liabilities And Stockholders Equity"]
+        ],
+    ]
+    return _order_from_synonyms(df, blocks)
+
+def order_cashflow(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Operating → Investing → Financing → Reconciliation.
+    """
+    df = _clean_statement(df_raw)
+    if df.empty: return df
+
+    blocks = [
+        [ # Operating
+          ["Net Income","Net Income Applicable To Common Shares","Net Income Common Stockholders","Net Income From Continuing Ops"],
+          ["Depreciation","Depreciation And Amortization","Depreciation Amortization Depletion"],
+          ["Change In Working Capital","Changes In Working Capital"],
+          ["Total Cash From Operating Activities","Operating Cash Flow","Net Cash Provided By Operating Activities"]
+        ],
+        [ # Investing
+          ["Capital Expenditures","Investments In Property Plant And Equipment"],
+          ["Acquisitions Net","Acquisition Of Business","Purchase Of Investments","Sale Of Investments"],
+          ["Other Investing Activities","Net Cash Used For Investing Activities","Net Cash Provided By (Used In) Investing Activities"]
+        ],
+        [ # Financing
+          ["Dividends Paid"],
+          ["Issuance Of Stock","Sale Of Stock"],
+          ["Repurchase Of Stock","Treasury Stock Issued","Stock Repurchased"],
+          ["Issuance Of Debt","Long Term Debt Issued"],
+          ["Repayment Of Debt","Long Term Debt Payments"],
+          ["Other Financing Activities","Net Cash Provided By (Used In) Financing Activities"]
+        ],
+        [ # Reconciliation
+          ["Effect Of Exchange Rate","Effect Of Exchange Rate On Cash"],
+          ["Net Change In Cash","Change In Cash And Cash Equivalents"],
+          ["Beginning Cash Position","Cash At Beginning Of Period"],
+          ["End Cash Position","Cash At End Of Period"]
+        ],
+    ]
+    return _order_from_synonyms(df, blocks)
+
+def tidy_statement_for_display(df: pd.DataFrame, take: int = 4, kind: Optional[str] = None) -> pd.DataFrame:
+    """
+    Return last `take` periods, most recent to the right, with **canonical row order** when kind is provided:
+      kind ∈ {"income","balance","cashflow"}.
+    Backward compatible: if kind=None, just trims/labels columns and preserves original order.
+    """
+    if df is None or df.empty: return pd.DataFrame()
+
+    # Apply canonical row ordering per kind
+    if kind == "income":
+        df = order_income_statement(df)
+    elif kind == "balance":
+        df = order_balance_sheet(df)
+    elif kind == "cashflow":
+        df = order_cashflow(df)
+    else:
+        df = _clean_statement(df)
+
     out = df.copy()
     try:
         out.columns = pd.to_datetime(out.columns)
@@ -846,6 +1030,8 @@ def tidy_statement_for_display(df: pd.DataFrame, take: int = 4) -> pd.DataFrame:
     except Exception:
         pass
     out = out.iloc[:, -take:]
+
+    # Friendly column labels (YYYY-MM-DD)
     new_cols = []
     for c in out.columns:
         try:
