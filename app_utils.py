@@ -1,6 +1,6 @@
 # app_utils.py — shared utilities for Rate My (Stock • Portfolio • Tracker)
 # UI (CSS/brand), peer universes, robust price loader, technicals/macro,
-# lightweight fundamentals snapshot & interpretation, portfolio editor helpers,
+# fundamentals snapshot & interpretation, portfolio editor helpers,
 # + Financial statements with CANONICAL ordering (Income/Balance/Cash Flow) and narrative.
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import yfinance as yf
 # ==========================  UI: CSS + Brand  ==========================
 
 def inject_css() -> None:
-    """Global CSS + script to rename the first sidebar nav item to 'Home'."""
+    """Global CSS + script to rename the first sidebar nav item to 'Home' and style Home cards/links."""
     st.markdown(
         """
         <style>
@@ -41,23 +41,34 @@ def inject_css() -> None:
         }
         .logo{width:56px;height:52px;flex:0 0 auto;}
 
-        .cta{ padding:.25rem; filter:drop-shadow(0 10px 18px rgba(0,0,0,.35)); }
-        .cta .stButton>button{
-          width:100%; padding:18px 22px; border-radius:14px; font-weight:800; font-size:1.05rem;
-          border:1px solid rgba(255,255,255,.14);
-          background:linear-gradient(90deg,#e85d58,#f39c12,#2ecc71);
-          color:#0e1015; box-shadow:0 1px 0 rgba(255,255,255,.06) inset;
-          transition:transform .08s ease, box-shadow .16s ease, filter .12s ease;
+        /* Home grid of link cards */
+        .home-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:.5rem}
+        @media (max-width: 900px){ .home-grid{grid-template-columns:1fr} }
+        .home-card{
+          border:1px solid #2e3339;border-radius:16px;padding:18px;background:#151920;
+          box-shadow:0 10px 18px rgba(0,0,0,.35);
         }
-        .cta.dark .stButton>button{background:#171a1f;color:#e6e8eb;border-color:#2e3339;}
-        .cta .stButton>button:hover{ transform:translateY(-1px); filter:saturate(1.06) brightness(1.05); }
-        .cta.dark .stButton>button:hover{ border-color:#3a3f46; }
+        .home-card h3{margin:0 0 6px 0}
+        .home-card p{margin:.25rem 0 .75rem 0;color:#b6bcc4}
+        .home-card a[data-testid="stPageLink"]{
+          display:flex;align-items:center;justify-content:center;gap:.6rem;
+          padding:12px 14px;border-radius:12px;text-decoration:none;font-weight:800;
+          border:1px solid #30343a;background:#171a1f;color:#e6e8eb;
+          box-shadow:0 1px 0 rgba(255,255,255,.06) inset, 0 4px 16px rgba(0,0,0,.35);
+          transition:transform .08s ease, box-shadow .16s ease, border-color .12s ease, background .12s ease;
+        }
+        .home-card a[data-testid="stPageLink"]:hover{
+          transform:translateY(-1px);
+          box-shadow:0 1px 0 rgba(255,255,255,.08) inset, 0 8px 24px rgba(0,0,0,.45);
+          border-color:#3a3f46;background:#1b1f26;
+        }
+        .home-card .pill{margin-left:.5rem}
 
         .pill{display:inline-block;padding:.15rem .5rem;border-radius:999px;border:1px solid #2c3239;background:#151920;color:#cfd4da;font-size:.85rem}
         </style>
 
         <script>
-        // Rename first sidebar nav label to "Home"
+        // Rename first sidebar nav label from "app" to "Home"
         (function(){
           function renameFirst(){
             try{
@@ -129,6 +140,16 @@ def zscore_series(s: pd.Series) -> pd.Series:
 
 def percentile_rank(s: pd.Series) -> pd.Series:
     return s.rank(pct=True) * 100.0
+
+# ==========================  Currency helpers (compatibility) ==========================
+
+# Public mapping some pages import
+_CURRENCY_SYMBOL: Dict[str, str] = {
+    "USD": "$", "EUR": "€", "GBP": "£", "JPY": "¥", "CAD": "C$", "AUD": "A$", "CHF": "CHF",
+    "SEK": "kr", "NOK": "kr", "DKK": "kr", "HKD": "HK$", "CNY": "¥", "TWD": "NT$", "KRW": "₩",
+    "INR": "₹", "SGD": "S$", "NZD": "NZ$", "ZAR": "R", "MXN": "MX$", "BRL": "R$", "TRY": "₺"
+}
+CURRENCY_MAP: Dict[str, str] = {"$":"USD","€":"EUR","£":"GBP","CHF":"CHF","C$":"CAD","A$":"AUD","¥":"JPY"}
 
 # ==========================  Peer universes ==========================
 
@@ -564,21 +585,18 @@ def _reorder_by_priority(df: pd.DataFrame, priority: List[Tuple[str, List[str]]]
     idx_map={_norm(i): i for i in df.index.astype(str)}
     used=set()
     ordered=[]
-    # add priority matches
-    for label, synonyms in priority:
+    for _label, synonyms in priority:
         found=None
         for syn in synonyms:
             key=_norm(syn)
             if key in idx_map:
                 found=idx_map[key]; break
         if not found:
-            # fuzzy contains
             for k, orig in idx_map.items():
                 if any(_norm(s) in k for s in synonyms):
                     found=orig; break
         if found and found not in used:
             ordered.append(found); used.add(found)
-    # append the rest in original order
     remainder=[i for i in df.index if i not in used]
     return df.loc[ordered + remainder]
 
@@ -604,29 +622,24 @@ def reorder_income_statement(df: pd.DataFrame) -> pd.DataFrame:
 
 def reorder_balance_sheet(df: pd.DataFrame) -> pd.DataFrame:
     priority = [
-        # Assets (current)
         ("Cash & Equivalents", ["Cash And Cash Equivalents","Cash And Short Term Investments","Cash"]),
         ("Short-term Investments", ["Short Term Investments"]),
         ("Accounts Receivable", ["Net Receivables","Accounts Receivable"]),
         ("Inventory", ["Inventory"]),
         ("Other Current Assets", ["Other Current Assets"]),
         ("Total Current Assets", ["Total Current Assets"]),
-        # Assets (non-current)
         ("Property, Plant & Equipment", ["Property Plant Equipment","Net Property Plant Equipment","PPE"]),
         ("Goodwill", ["Goodwill"]),
         ("Intangibles", ["Intangible Assets","Other Intangible Assets"]),
         ("Other Assets", ["Other Assets"]),
         ("Total Assets", ["Total Assets"]),
-        # Liabilities (current)
         ("Accounts Payable", ["Accounts Payable"]),
         ("Short-term Debt", ["Short Long Term Debt","Short Term Debt","Current Portion Of Long Term Debt"]),
         ("Other Current Liabilities", ["Other Current Liabilities"]),
         ("Total Current Liabilities", ["Total Current Liabilities"]),
-        # Liabilities (long-term)
         ("Long-term Debt", ["Long Term Debt"]),
         ("Other Liabilities", ["Other Liabilities"]),
         ("Total Liabilities", ["Total Liab","Total Liabilities"]),
-        # Equity
         ("Common Stock", ["Common Stock","Common Stock Equity"]),
         ("Additional Paid In Capital", ["Additional Paid In Capital"]),
         ("Retained Earnings", ["Retained Earnings","Retained Earnings Total Equity"]),
@@ -645,7 +658,7 @@ def reorder_cashflow(df: pd.DataFrame) -> pd.DataFrame:
         ("Change in Working Capital", ["Change In Working Capital"]),
         ("Operating Cash Flow", ["Total Cash From Operating Activities","Net Cash Provided By Operating Activities"]),
         ("Capital Expenditures", ["Capital Expenditures","Investments In Property Plant And Equipment"]),
-        ("Free Cash Flow", ["Free Cash Flow"]),  # derived sometimes; kept if provider supplies
+        ("Free Cash Flow", ["Free Cash Flow"]),
         ("Acquisitions/Investments", ["Acquisitions Net","Net Other Investing Changes","Investments"]),
         ("Investing Cash Flow", ["Total Cashflows From Investing Activities","Net Cash Used For Investing Activities"]),
         ("Dividends Paid", ["Dividends Paid"]),
