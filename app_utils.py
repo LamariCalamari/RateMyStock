@@ -1,7 +1,7 @@
 # app_utils.py — shared utilities for Rate My (Stock • Portfolio • Tracker)
 # UI (CSS/brand), peer universes, robust price loader, technicals/macro,
 # fundamentals snapshot & interpretation, portfolio editor helpers,
-# + Financial statements with CANONICAL ordering (Income/Balance/Cash Flow) and narrative.
+# + Financial statements with CANONICAL ordering and newest period first.
 
 from __future__ import annotations
 
@@ -62,7 +62,6 @@ def inject_css() -> None:
           box-shadow:0 1px 0 rgba(255,255,255,.08) inset, 0 8px 24px rgba(0,0,0,.45);
           border-color:#3a3f46;background:#1b1f26;
         }
-        .home-card .pill{margin-left:.5rem}
 
         .pill{display:inline-block;padding:.15rem .5rem;border-radius:999px;border:1px solid #2c3239;background:#151920;color:#cfd4da;font-size:.85rem}
         </style>
@@ -141,9 +140,8 @@ def zscore_series(s: pd.Series) -> pd.Series:
 def percentile_rank(s: pd.Series) -> pd.Series:
     return s.rank(pct=True) * 100.0
 
-# ==========================  Currency helpers (compatibility) ==========================
+# ==========================  Currency helpers (compat) ==========================
 
-# Public mapping some pages import
 _CURRENCY_SYMBOL: Dict[str, str] = {
     "USD": "$", "EUR": "€", "GBP": "£", "JPY": "¥", "CAD": "C$", "AUD": "A$", "CHF": "CHF",
     "SEK": "kr", "NOK": "kr", "DKK": "kr", "HKD": "HK$", "CNY": "¥", "TWD": "NT$", "KRW": "₩",
@@ -540,7 +538,7 @@ def holdings_editor_form(currency_symbol: str, total_value: float) -> Tuple[pd.D
     df_hold=pd.DataFrame({"ticker":out["ticker"], "weight":w})
     return df_hold, current
 
-# ==========================  Financial statements (ordered) ==========================
+# ==========================  Financial statements (ordered + newest-first) ==========================
 
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(s).lower())
@@ -552,6 +550,7 @@ def _clean_statement(df: pd.DataFrame) -> pd.DataFrame:
     out=out[~out.index.duplicated(keep="first")]
     for c in out.columns:
         out[c]=pd.to_numeric(out[c], errors="coerce")
+    # Keep chronological index, but we will flip to newest-first in tidy function
     try:
         out.columns=pd.to_datetime(out.columns); out=out.sort_index(axis=1)
     except Exception:
@@ -579,130 +578,186 @@ def fetch_company_statements(ticker: str) -> Dict[str, object]:
         "cashflow_q": safe("quarterly_cashflow"),
     }
 
-def _reorder_by_priority(df: pd.DataFrame, priority: List[Tuple[str, List[str]]]) -> pd.DataFrame:
-    """Return df with rows ordered by priority (fuzzy match), unknown rows appended at end."""
+def _reorder_by_priority(df: pd.DataFrame, sequence: List[Tuple[str, List[str]]]) -> pd.DataFrame:
+    """
+    Reorder rows to follow 'sequence' of (canonical_label, synonyms).
+    Matching uses: exact normalized match → startswith → contains.
+    Unmatched rows are appended at the end in original order.
+    """
     if df is None or df.empty: return pd.DataFrame()
-    idx_map={_norm(i): i for i in df.index.astype(str)}
-    used=set()
-    ordered=[]
-    for _label, synonyms in priority:
-        found=None
-        for syn in synonyms:
-            key=_norm(syn)
-            if key in idx_map:
-                found=idx_map[key]; break
-        if not found:
-            for k, orig in idx_map.items():
-                if any(_norm(s) in k for s in synonyms):
-                    found=orig; break
-        if found and found not in used:
-            ordered.append(found); used.add(found)
-    remainder=[i for i in df.index if i not in used]
-    return df.loc[ordered + remainder]
+    idx = list(df.index.astype(str))
+    norm2orig = { _norm(i): i for i in idx }
+    used = set()
+    ordered_labels: List[str] = []
+
+    def find_row(syns: List[str]) -> Optional[str]:
+        # exact
+        for syn in syns:
+            k=_norm(syn)
+            if k in norm2orig and norm2orig[k] not in used:
+                return norm2orig[k]
+        # prefix
+        for syn in syns:
+            k=_norm(syn)
+            for n, o in norm2orig.items():
+                if n.startswith(k) and o not in used:
+                    return o
+        # contains
+        for syn in syns:
+            k=_norm(syn)
+            for n, o in norm2orig.items():
+                if k in n and o not in used:
+                    return o
+        return None
+
+    for canonical, syns in sequence:
+        row = find_row(syns+[canonical])
+        if row:
+            ordered_labels.append(row)
+            used.add(row)
+
+    # append all others (unmatched)
+    remainder = [i for i in idx if i not in used]
+    return df.loc[ordered_labels + remainder]
+
+# ---- Canonical sequences ----
+
+INCOME_ORDER: List[Tuple[str, List[str]]] = [
+    ("Total Revenue", ["Total Revenue","Revenue","Sales","Operating Revenue","Net Sales"]),
+    ("Cost of Revenue", ["Cost Of Revenue","Cost of Goods Sold","COGS"]),
+    ("Gross Profit", ["Gross Profit"]),
+    # Operating expenses
+    ("Research & Development", ["Research Development","R&D","Research And Development"]),
+    ("Selling, General & Administrative", ["Selling General Administrative","SG&A",
+                                           "Selling General & Administrative","General And Administrative"]),
+    ("Depreciation & Amortization", ["Depreciation","Depreciation Amortization"]),
+    ("Other Operating Expenses", ["Other Operating Expenses","Other Operating Expense"]),
+    ("Total Operating Expenses", ["Total Operating Expenses","Operating Expense","Operating Expenses"]),
+    ("Operating Income (EBIT)", ["Operating Income","Operating Profit","Ebit","EBIT"]),
+    # Non-operating
+    ("Interest Income", ["Interest Income"]),
+    ("Interest Expense", ["Interest Expense","Interest Expense Non Operating"]),
+    ("Other Income/Expense", ["Other Income Expense Net","Total Other Income/Expenses Net",
+                              "Non Operating Income Net","Other Non Operating Income Expenses"]),
+    ("Income Before Tax (EBT)", ["Income Before Tax","Pretax Income","Earnings Before Tax"]),
+    ("Income Tax Expense", ["Income Tax Expense","Provision For Income Taxes"]),
+    # Per-share BEFORE net income so that **Net Income is last**
+    ("Basic EPS", ["Basic EPS","Basic EPS Total Operations"]),
+    ("Diluted EPS", ["Diluted EPS","Diluted EPS Total Operations"]),
+    # Bottom line
+    ("Net Income", ["Net Income","Net Income Common Stockholders",
+                    "Net Income Applicable To Common Shares","Net Income Including Noncontrolling Interests"]),
+]
+
+BALANCE_ORDER: List[Tuple[str, List[str]]] = [
+    # Assets — current
+    ("Cash & Cash Equivalents", ["Cash And Cash Equivalents","Cash And Short Term Investments","Cash"]),
+    ("Short-term Investments", ["Short Term Investments"]),
+    ("Accounts Receivable", ["Net Receivables","Accounts Receivable"]),
+    ("Inventory", ["Inventory"]),
+    ("Other Current Assets", ["Other Current Assets"]),
+    ("Total Current Assets", ["Total Current Assets"]),
+    # Assets — non-current
+    ("Property, Plant & Equipment", ["Property Plant Equipment","Net Property Plant Equipment","PPE"]),
+    ("Goodwill", ["Goodwill"]),
+    ("Intangible Assets", ["Intangible Assets","Other Intangible Assets"]),
+    ("Other Assets", ["Other Assets"]),
+    ("Total Assets", ["Total Assets"]),
+    # Liabilities — current
+    ("Accounts Payable", ["Accounts Payable"]),
+    ("Short-term Debt", ["Short Long Term Debt","Short Term Debt","Current Portion Of Long Term Debt"]),
+    ("Other Current Liabilities", ["Other Current Liabilities"]),
+    ("Total Current Liabilities", ["Total Current Liabilities"]),
+    # Liabilities — non-current
+    ("Long-term Debt", ["Long Term Debt"]),
+    ("Other Liabilities", ["Other Liabilities"]),
+    ("Total Liabilities", ["Total Liab","Total Liabilities"]),
+    # Equity
+    ("Common Stock", ["Common Stock","Common Stock Equity"]),
+    ("Additional Paid In Capital", ["Additional Paid In Capital","Capital Surplus"]),
+    ("Retained Earnings", ["Retained Earnings","Retained Earnings Total Equity"]),
+    ("Treasury Stock", ["Treasury Stock"]),
+    ("Accumulated Other Comprehensive Income", ["Accumulated Other Comprehensive Income","AOCI"]),
+    ("Total Equity", ["Total Stockholder Equity","Total Equity","Total Shareholder Equity"]),
+    ("Total Liabilities & Equity", ["Total Liabilities And Stockholders Equity","Total Liabilities And Equity"]),
+]
+
+CASHFLOW_ORDER: List[Tuple[str, List[str]]] = [
+    # Operating
+    ("Net Income", ["Net Income","Net Income Cash Flow","Net Income Starting Line"]),
+    ("Depreciation & Amortization", ["Depreciation","Depreciation Amortization"]),
+    ("Stock-based Compensation", ["Stock Based Compensation"]),
+    ("Change in Working Capital", ["Change In Working Capital"]),
+    ("Operating Cash Flow", ["Total Cash From Operating Activities","Net Cash Provided By Operating Activities"]),
+    # Investing
+    ("Capital Expenditures", ["Capital Expenditures","Investments In Property Plant And Equipment"]),
+    ("Acquisitions/Investments", ["Acquisitions Net","Net Other Investing Changes","Investments"]),
+    ("Investing Cash Flow", ["Total Cashflows From Investing Activities","Net Cash Used For Investing Activities"]),
+    # Financing
+    ("Dividends Paid", ["Dividends Paid"]),
+    ("Share Repurchase", ["Sale Purchase Of Stock","Repurchase Of Capital Stock"]),
+    ("Debt Issued (repaid)", ["Net Borrowings","Issuance Of Debt","Repayment Of Debt"]),
+    ("Financing Cash Flow", ["Total Cash From Financing Activities","Net Cash Used Provided By Financing Activities"]),
+    # Net change
+    ("Effect of FX Changes", ["Effect Of Exchange Rate Changes"]),
+    ("Net Change in Cash", ["Change In Cash","Net Increase Decrease In Cash"]),
+]
 
 def reorder_income_statement(df: pd.DataFrame) -> pd.DataFrame:
-    priority = [
-        ("Total Revenue", ["Total Revenue","Revenue","Sales"]),
-        ("Cost of Revenue", ["Cost Of Revenue","Cost of Goods Sold","COGS"]),
-        ("Gross Profit", ["Gross Profit"]),
-        ("Research & Development", ["Research Development","R&D","Research And Development"]),
-        ("Selling, General & Administrative", ["Selling General Administrative","SG&A","Selling General & Administrative","General And Administrative"]),
-        ("Operating Expenses", ["Total Operating Expenses","Operating Expense","Operating Expenses"]),
-        ("Operating Income (EBIT)", ["Operating Income","Operating Profit","Ebit","EBIT"]),
-        ("Interest Expense", ["Interest Expense","Interest Expense Non Operating"]),
-        ("Other Income/Expense", ["Other Income Expense Net","Total Other Income/Expenses Net","Non Operating Income Net"]),
-        ("Income Before Tax (EBT)", ["Income Before Tax","Pretax Income","Earnings Before Tax"]),
-        ("Income Tax Expense", ["Income Tax Expense","Provision For Income Taxes"]),
-        ("Net Income", ["Net Income","Net Income Common Stockholders","Net Income Applicable To Common Shares"]),
-        ("EBITDA", ["Ebitda","EBITDA"]),
-        ("Basic EPS", ["Basic EPS","Basic EPS Total Operations"]),
-        ("Diluted EPS", ["Diluted EPS","Diluted EPS Total Operations"]),
-    ]
-    return _reorder_by_priority(df, priority)
+    return _reorder_by_priority(df, INCOME_ORDER)
 
 def reorder_balance_sheet(df: pd.DataFrame) -> pd.DataFrame:
-    priority = [
-        ("Cash & Equivalents", ["Cash And Cash Equivalents","Cash And Short Term Investments","Cash"]),
-        ("Short-term Investments", ["Short Term Investments"]),
-        ("Accounts Receivable", ["Net Receivables","Accounts Receivable"]),
-        ("Inventory", ["Inventory"]),
-        ("Other Current Assets", ["Other Current Assets"]),
-        ("Total Current Assets", ["Total Current Assets"]),
-        ("Property, Plant & Equipment", ["Property Plant Equipment","Net Property Plant Equipment","PPE"]),
-        ("Goodwill", ["Goodwill"]),
-        ("Intangibles", ["Intangible Assets","Other Intangible Assets"]),
-        ("Other Assets", ["Other Assets"]),
-        ("Total Assets", ["Total Assets"]),
-        ("Accounts Payable", ["Accounts Payable"]),
-        ("Short-term Debt", ["Short Long Term Debt","Short Term Debt","Current Portion Of Long Term Debt"]),
-        ("Other Current Liabilities", ["Other Current Liabilities"]),
-        ("Total Current Liabilities", ["Total Current Liabilities"]),
-        ("Long-term Debt", ["Long Term Debt"]),
-        ("Other Liabilities", ["Other Liabilities"]),
-        ("Total Liabilities", ["Total Liab","Total Liabilities"]),
-        ("Common Stock", ["Common Stock","Common Stock Equity"]),
-        ("Additional Paid In Capital", ["Additional Paid In Capital"]),
-        ("Retained Earnings", ["Retained Earnings","Retained Earnings Total Equity"]),
-        ("Treasury Stock", ["Treasury Stock"]),
-        ("Accumulated Other Comprehensive Income", ["Accumulated Other Comprehensive Income","AOCI"]),
-        ("Total Equity", ["Total Stockholder Equity","Total Equity","Total Shareholder Equity"]),
-        ("Total Liabilities & Equity", ["Total Liabilities And Stockholders Equity","Total Liabilities And Equity"]),
-    ]
-    return _reorder_by_priority(df, priority)
+    # Enforce Assets → Liabilities → Equity by ordering with the sequence above.
+    return _reorder_by_priority(df, BALANCE_ORDER)
 
 def reorder_cashflow(df: pd.DataFrame) -> pd.DataFrame:
-    priority = [
-        ("Net Income", ["Net Income","Net Income Cash Flow"]),
-        ("Depreciation & Amortization", ["Depreciation","Depreciation Amortization"]),
-        ("Stock-based Compensation", ["Stock Based Compensation"]),
-        ("Change in Working Capital", ["Change In Working Capital"]),
-        ("Operating Cash Flow", ["Total Cash From Operating Activities","Net Cash Provided By Operating Activities"]),
-        ("Capital Expenditures", ["Capital Expenditures","Investments In Property Plant And Equipment"]),
-        ("Free Cash Flow", ["Free Cash Flow"]),
-        ("Acquisitions/Investments", ["Acquisitions Net","Net Other Investing Changes","Investments"]),
-        ("Investing Cash Flow", ["Total Cashflows From Investing Activities","Net Cash Used For Investing Activities"]),
-        ("Dividends Paid", ["Dividends Paid"]),
-        ("Share Repurchase", ["Sale Purchase Of Stock","Repurchase Of Capital Stock"]),
-        ("Debt Issued (repaid)", ["Net Borrowings","Issuance Of Debt","Repayment Of Debt"]),
-        ("Financing Cash Flow", ["Total Cash From Financing Activities","Net Cash Used Provided By Financing Activities"]),
-        ("Net Change in Cash", ["Change In Cash","Effect Of Exchange Rate Changes","Net Increase Decrease In Cash"]),
-    ]
-    return _reorder_by_priority(df, priority)
+    return _reorder_by_priority(df, CASHFLOW_ORDER)
 
-def tidy_statement_for_display(df: pd.DataFrame, take: int = 4) -> pd.DataFrame:
+def tidy_statement_for_display(df: pd.DataFrame, take: int = 4, newest_first: bool = True) -> pd.DataFrame:
+    """
+    Keep last `take` periods; if `newest_first` True, show the most recent on the LEFT (common in dashboards).
+    """
     if df is None or df.empty: return pd.DataFrame()
     out=df.copy()
     try:
-        out.columns=pd.to_datetime(out.columns); out=out.sort_index(axis=1)
+        out.columns=pd.to_datetime(out.columns)
+        out=out.sort_index(axis=1)  # ascending time
     except Exception:
         pass
     out=out.iloc[:, -take:]
-    out.columns=[str(pd.to_datetime(c).date()) if not isinstance(c,str) else str(c) for c in out.columns]
+    if newest_first:
+        out=out[out.columns[::-1]]  # reverse columns so newest is leftmost
+    # Friendly col labels
+    out.columns=[str(getattr(c, "date", c)) for c in out.columns]
+    # Round small noise
+    for c in out.columns: out[c]=pd.to_numeric(out[c], errors="coerce").round(2)
     return out
+
+# ===== Key ratios / narrative from statements =====
 
 def _pick(df: pd.DataFrame, candidates: List[str]) -> Optional[pd.Series]:
     if df is None or df.empty: return None
     idx_map={_norm(i): i for i in df.index.astype(str)}
+    # exact
     for c in candidates:
-        key=_norm(c)
-        if key in idx_map: return pd.to_numeric(df.loc[idx_map[key]], errors="coerce")
+        k=_norm(c)
+        if k in idx_map: return pd.to_numeric(df.loc[idx_map[k]], errors="coerce")
+    # contains
     for c in candidates:
-        key=_norm(c)
-        for k, orig in idx_map.items():
-            if key in k: return pd.to_numeric(df.loc[orig], errors="coerce")
+        k=_norm(c)
+        for n, o in idx_map.items():
+            if k in n: return pd.to_numeric(df.loc[o], errors="coerce")
     return None
 
 def _last(series: Optional[pd.Series]) -> float:
     if series is None: return np.nan
     s=series.dropna()
-    if s.empty: return np.nan
-    return float(s.iloc[-1])
+    return float(s.iloc[0] if s.size else np.nan)  # series already newest-first in tidy; here we use raw (chronological)
 
 def _prev(series: Optional[pd.Series]) -> float:
     if series is None: return np.nan
     s=series.dropna()
-    if s.size<2: return np.nan
-    return float(s.iloc[-2])
+    return float(s.iloc[-2]) if s.size>=2 else np.nan  # when chronological
 
 def statement_metrics(stmts: Dict[str, object]) -> Dict[str, float]:
     inc=stmts.get("income", pd.DataFrame())
@@ -728,24 +783,30 @@ def statement_metrics(stmts: Dict[str, object]) -> Dict[str, float]:
     ocf   = _pick(cf,  ["Total Cash From Operating Activities","Net Cash Provided By Operating Activities"])
     capex = _pick(cf,  ["Capital Expenditures","Investments In Property Plant And Equipment"])
 
-    revenue      = _last(rev); revenue_prev=_prev(rev)
-    gross_profit = _last(gross)
-    operating_inc= _last(opinc)
-    net_income   = _last(net)
-    interest_exp = abs(_last(intr)) if not np.isnan(_last(intr)) else np.nan
+    # Last/prev values (chronological in raw statements; newest is last)
+    def last(series): 
+        s = series.dropna() if series is not None else pd.Series(dtype=float)
+        return float(s.iloc[-1]) if s.size else np.nan
+    def prev(series):
+        s = series.dropna() if series is not None else pd.Series(dtype=float)
+        return float(s.iloc[-2]) if s.size>1 else np.nan
 
-    total_assets = _last(ta)
-    equity       = _last(teq)
-    if np.isnan(equity) and not np.isnan(_last(tliab)) and not np.isnan(total_assets):
-        equity = total_assets - _last(tliab)
+    revenue      = last(rev);   revenue_prev = prev(rev)
+    gross_profit = last(gross); operating_inc = last(opinc)
+    net_income   = last(net);   interest_exp  = abs(last(intr)) if not np.isnan(last(intr)) else np.nan
 
-    current_assets      = _last(ca)
-    current_liabilities = _last(cl)
-    inventory           = _last(inv)
-    total_debt          = np.nansum([_last(ltd), _last(std), _last(notes)])
+    total_assets = last(ta)
+    equity       = last(teq) if not np.isnan(last(teq)) else np.nan
+    if np.isnan(equity) and not np.isnan(last(tliab)) and not np.isnan(total_assets):
+        equity = total_assets - last(tliab)
 
-    op_cash_flow = _last(ocf)
-    capex_val    = _last(capex)
+    current_assets      = last(ca)
+    current_liabilities = last(cl)
+    inventory           = last(inv)
+    total_debt          = np.nansum([last(ltd), last(std), last(notes)])
+
+    op_cash_flow = last(ocf)
+    capex_val    = last(capex)
     fcf          = op_cash_flow - (capex_val if not np.isnan(capex_val) else 0.0)
 
     gross_margin     = (gross_profit/revenue) if revenue else np.nan
@@ -762,10 +823,11 @@ def statement_metrics(stmts: Dict[str, object]) -> Dict[str, float]:
     roa    = (net_income/total_assets) if total_assets else np.nan
     icov   = (operating_inc/interest_exp) if interest_exp and not np.isnan(operating_inc) else np.nan
 
+    # Margin YoY deltas
     def _ratio_yoy(series_num, series_den):
         try:
-            n0, n1 = _last(series_num), _prev(series_num)
-            d0, d1 = _last(series_den), _prev(series_den)
+            n0, n1 = last(series_num), prev(series_num)
+            d0, d1 = last(series_den), prev(series_den)
             if d0 and d1:
                 m0, m1 = (n0/d0), (n1/d1)
                 return m0, (m0-m1)
