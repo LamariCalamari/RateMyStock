@@ -1,6 +1,7 @@
-# app_utils.py — shared utilities for Rate My (Stock + Portfolio + Tracker)
-# UI (CSS/brand), peer universes, robust price loader, technical + macro features,
-# fundamentals + interpretation, portfolio editor, and WELL-ORDERED financial statements.
+# app_utils.py
+# Utilities shared across the app: UI, data fetch, peer universes, features,
+# fundamentals interpretation, portfolio editor, and properly ordered
+# financial statements (+ ratios & narrative).
 
 from __future__ import annotations
 
@@ -16,13 +17,17 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-# ==========================  UI: CSS + Brand  ==========================
+# ---------------------------------------------------------------------
+# UI: CSS + brand
+# ---------------------------------------------------------------------
 
 def inject_css() -> None:
+    """Global CSS and a tiny script to rename the first sidebar nav item to 'Home'."""
     st.markdown(
         """
         <style>
         .block-container{max-width:1140px;}
+
         .kpi-card{padding:1rem 1.1rem;border-radius:12px;background:#111418;border:1px solid #222}
         .kpi-num{font-size:2.2rem;font-weight:800;margin-top:.25rem}
         .small-muted{color:#9aa0a6;font-size:.9rem}
@@ -48,25 +53,24 @@ def inject_css() -> None:
         }
         .cta.dark .stButton>button{ background:#171a1f; color:#e6e8eb; border-color:#2e3339; }
         .cta .stButton>button:hover{ transform:translateY(-1px); filter:saturate(1.06) brightness(1.05); }
-        .cta.dark .stButton>button:hover{ border-color:#3a3f46; }
-        .hr-lite{height:1px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.08),transparent);border:0;margin:18px 0;}
+
         .pill{display:inline-block;padding:.15rem .5rem;border-radius:999px;border:1px solid #2c3239;background:#151920;color:#cfd4da;font-size:.85rem}
         </style>
-
         <script>
-        (function(){
-          function renameFirst(){
-            try{
-              const nav = document.querySelector('[data-testid="stSidebarNav"]');
-              if(!nav) return;
-              const first = nav.querySelector('ul li:first-child a p');
-              if(first && first.textContent.trim().toLowerCase()==='app'){ first.textContent = 'Home'; }
-            }catch(e){}
-          }
-          const obs = new MutationObserver(renameFirst);
-          obs.observe(document.body,{childList:true,subtree:true});
-          renameFirst();
-        })();
+          // rename 'app' → 'Home' in sidebar nav
+          (function(){
+            function renameFirst(){
+              try{
+                const nav = document.querySelector('[data-testid="stSidebarNav"]');
+                if(!nav) return;
+                const first = nav.querySelector('ul li:first-child a p');
+                if(first && first.textContent.trim().toLowerCase()==='app'){ first.textContent='Home'; }
+              }catch(e){}
+            }
+            const obs=new MutationObserver(renameFirst);
+            obs.observe(document.body,{childList:true,subtree:true});
+            renameFirst();
+          })();
         </script>
         """,
         unsafe_allow_html=True,
@@ -91,10 +95,13 @@ def brand_header(title: str) -> None:
 
 def topbar_back(label: str = "← Back", url: Optional[str] = None) -> None:
     st.markdown('<div class="topbar">', unsafe_allow_html=True)
-    if url: st.page_link(url, label=label)
+    if url:
+        st.page_link(url, label=label)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# ==========================  Core helpers  ==========================
+# ---------------------------------------------------------------------
+# Core helpers
+# ---------------------------------------------------------------------
 
 def yf_symbol(t: str) -> str:
     if not isinstance(t, str): return t
@@ -126,7 +133,9 @@ def zscore_series(s: pd.Series) -> pd.Series:
 def percentile_rank(s: pd.Series) -> pd.Series:
     return s.rank(pct=True) * 100.0
 
-# ==========================  Peer universes  ==========================
+# ---------------------------------------------------------------------
+# Index lists (indices.py → snapshot → fallback)
+# ---------------------------------------------------------------------
 
 try:
     from indices import SP500_LIST as _SP500, NASDAQ100_LIST as _NDX, DOW30_LIST as _DOW
@@ -147,9 +156,11 @@ _SNAPSHOT_FILE = os.path.join(os.path.dirname(__file__), "peer_lists_snapshot.js
 @st.cache_resource(show_spinner=False)
 def _load_or_snapshot_peer_lists() -> Dict[str, List[str]]:
     if _SP500 or _NDX or _DOW:
-        return {"S&P 500": _normalize_list(_SP500),
-                "NASDAQ 100": _normalize_list(_NDX),
-                "Dow 30": _normalize_list(_DOW)}
+        return {
+            "S&P 500": _normalize_list(_SP500),
+            "NASDAQ 100": _normalize_list(_NDX),
+            "Dow 30": _normalize_list(_DOW),
+        }
     if os.path.exists(_SNAPSHOT_FILE):
         try:
             with open(_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
@@ -167,73 +178,90 @@ def _load_or_snapshot_peer_lists() -> Dict[str, List[str]]:
 
 PEER_CATALOG: Dict[str, List[str]] = _load_or_snapshot_peer_lists()
 
-def set_peer_catalog(sp500: Optional[List[str]]=None, ndx: Optional[List[str]]=None, dow: Optional[List[str]]=None) -> None:
+def set_peer_catalog(sp500: Optional[List[str]] = None,
+                     ndx: Optional[List[str]] = None,
+                     dow: Optional[List[str]] = None) -> None:
     if sp500 is not None: PEER_CATALOG["S&P 500"] = _normalize_list(sp500)
-    if ndx   is not None: PEER_CATALOG["NASDAQ 100"] = _normalize_list(ndx)
-    if dow   is not None: PEER_CATALOG["Dow 30"] = _normalize_list(dow)
+    if ndx is not None:   PEER_CATALOG["NASDAQ 100"] = _normalize_list(ndx)
+    if dow is not None:   PEER_CATALOG["Dow 30"] = _normalize_list(dow)
 
-# ==========================  Data fetchers  ==========================
+# ---------------------------------------------------------------------
+# Data fetchers (robust 3-pass loader)
+# ---------------------------------------------------------------------
 
 @st.cache_data(show_spinner=False)
 def fetch_prices_chunked_with_fallback(
-    tickers: Iterable[str], period: str="1y", interval: str="1d",
-    chunk: int=20, retries: int=4, sleep_between: float=1.0, singles_pause: float=1.1,
-    hard_limit: int=700
+    tickers: Iterable[str],
+    period: str = "1y",
+    interval: str = "1d",
+    chunk: int = 20,
+    retries: int = 4,
+    sleep_between: float = 1.0,
+    singles_pause: float = 1.1,
+    hard_limit: int = 700,
 ) -> Tuple[pd.DataFrame, List[str]]:
     names = [yf_symbol(t) for t in tickers if t]
     names = list(dict.fromkeys(names))[:hard_limit]
-    if not names: return pd.DataFrame(), []
+    if not names:
+        return pd.DataFrame(), []
 
-    frames: List[pd.Series] = []; ok: List[str] = []
+    frames: List[pd.Series] = []
+    ok: List[str] = []
+
+    # Pass 1 — singles with retries
     missing = names[:]
-
-    # Pass 1: singles
     for _ in range(retries):
-        new_missing=[]
+        new_missing = []
         for t in missing:
             try:
-                df = yf.download(t, period=period, interval=interval,
-                                 auto_adjust=True, group_by="ticker",
-                                 threads=False, progress=False)
+                df = yf.download(
+                    t, period=period, interval=interval,
+                    auto_adjust=True, group_by="ticker",
+                    threads=False, progress=False
+                )
                 if isinstance(df, pd.DataFrame) and "Close" in df:
                     s = df["Close"].dropna()
-                    if s.size>0: frames.append(s.rename(t)); ok.append(t)
+                    if s.size > 0: frames.append(s.rename(t)); ok.append(t)
                     else: new_missing.append(t)
-                else: new_missing.append(t)
+                else:
+                    new_missing.append(t)
             except Exception:
                 new_missing.append(t)
-            time.sleep(singles_pause + random.uniform(0,0.25))
+            time.sleep(singles_pause + random.uniform(0, 0.25))
         missing = new_missing
         if not missing: break
 
-    # Pass 2: chunks
+    # Pass 2 — bulk groups
     def _append_from_multi(df: pd.DataFrame, group: List[str]):
         if not isinstance(df.columns, pd.MultiIndex):
             t0 = group[0]
             if "Close" in df:
-                s=df["Close"].dropna()
-                if s.size>0: frames.append(s.rename(t0)); ok.append(t0)
+                s = df["Close"].dropna()
+                if s.size > 0: frames.append(s.rename(t0)); ok.append(t0)
             return
         got = set(df.columns.get_level_values(0))
         for t in group:
             if t in got:
                 s = df[t]["Close"].dropna()
-                if s.size>0: frames.append(s.rename(t)); ok.append(t)
+                if s.size > 0: frames.append(s.rename(t)); ok.append(t)
 
     if missing:
         for i in range(0, len(missing), chunk):
             group = missing[i:i+chunk]
             try:
-                df = yf.download(group, period=period, interval=interval,
-                                 auto_adjust=True, group_by="ticker",
-                                 threads=False, progress=False)
+                df = yf.download(
+                    group, period=period, interval=interval,
+                    auto_adjust=True, group_by="ticker",
+                    threads=False, progress=False
+                )
                 _append_from_multi(df, group)
             except Exception:
                 pass
-            time.sleep(sleep_between + random.uniform(0,0.25))
-        ok_set=set(ok); missing=[t for t in names if t not in ok_set]
+            time.sleep(sleep_between + random.uniform(0, 0.25))
+        ok_set = set(ok)
+        missing = [t for t in names if t not in ok_set]
 
-    # Pass 3: Ticker.history
+    # Pass 3 — history() fallback
     if missing:
         for t in missing:
             try:
@@ -242,7 +270,7 @@ def fetch_prices_chunked_with_fallback(
                     frames.append(h["Close"].dropna().rename(t)); ok.append(t)
             except Exception:
                 pass
-            time.sleep(singles_pause + random.uniform(0.1,0.35))
+            time.sleep(singles_pause + random.uniform(0.1, 0.35))
 
     prices = pd.concat(frames, axis=1).sort_index() if frames else pd.DataFrame()
     if not prices.empty:
@@ -251,7 +279,7 @@ def fetch_prices_chunked_with_fallback(
     return prices, ok
 
 @st.cache_data(show_spinner=False)
-def fetch_vix_series(period: str="6mo", interval: str="1d") -> pd.Series:
+def fetch_vix_series(period: str = "6mo", interval: str = "1d") -> pd.Series:
     try:
         df = yf.Ticker("^VIX").history(period=period, interval=interval)
         if not df.empty: return df["Close"].rename("^VIX")
@@ -267,60 +295,68 @@ def fetch_fundamentals_simple(tickers: Iterable[str]) -> pd.DataFrame:
     rows=[]
     for raw in tickers:
         t=yf_symbol(raw)
-        try: info = yf.Ticker(t).info or {}
-        except Exception: info={}
+        try:
+            info = yf.Ticker(t).info or {}
+        except Exception:
+            info={}
         row={"ticker":t}
         for k in keep:
-            try: row[k]=float(info.get(k,np.nan))
+            try: row[k]=float(info.get(k, np.nan))
             except Exception: row[k]=np.nan
         rows.append(row)
     return pd.DataFrame(rows).set_index("ticker")
 
-# ==========================  Universe builder  ==========================
+# ---------------------------------------------------------------------
+# Universe builder
+# ---------------------------------------------------------------------
 
-def build_universe(user_tickers: List[str], mode: str, sample_n: int=150, custom_raw: str="") -> Tuple[List[str], str]:
+def build_universe(user_tickers: List[str], mode: str, sample_n: int = 150,
+                   custom_raw: str = "") -> Tuple[List[str], str]:
     user = [yf_symbol(t) for t in user_tickers if t]
     user_set = set(user)
 
     if mode == "Custom (paste list)":
         custom = {yf_symbol(t) for t in custom_raw.split(",") if t.strip()}
         peers_all = sorted(list(custom - user_set)); label = "Custom"
-    elif mode in ("S&P 500","NASDAQ 100","Dow 30"):
-        peers_all = [t for t in PEER_CATALOG.get(mode,[]) if t not in user_set]; label = mode
+    elif mode in ("S&P 500", "NASDAQ 100", "Dow 30"):
+        peers_all = [t for t in PEER_CATALOG.get(mode, []) if t not in user_set]; label = mode
     else:
-        chosen="S&P 500"
+        chosen = "S&P 500"
         for label_try in ("S&P 500","Dow 30","NASDAQ 100"):
-            base=set(PEER_CATALOG.get(label_try,[]))
-            if user_set & base: chosen=label_try; break
-        label=chosen
-        peers_all=[t for t in PEER_CATALOG.get(chosen,[]) if t not in user_set]
+            base = set(PEER_CATALOG.get(label_try, []))
+            if user_set & base: chosen = label_try; break
+        label = chosen
+        peers_all = [t for t in PEER_CATALOG.get(chosen, []) if t not in user_set]
 
-    if sample_n and len(peers_all)>sample_n:
-        step=max(1, len(peers_all)//sample_n); peers=peers_all[::step][:sample_n]
+    if sample_n and len(peers_all) > sample_n:
+        step = max(1, len(peers_all)//sample_n)
+        peers = peers_all[::step][:sample_n]
     else:
-        peers=peers_all
+        peers = peers_all
 
-    universe=sorted(list(user_set | set(peers)))[:700]
+    universe = sorted(list(user_set | set(peers)))[:700]
     return universe, label
 
-# ==========================  Features / Macro  ==========================
+# ---------------------------------------------------------------------
+# Feature builders and macro
+# ---------------------------------------------------------------------
 
-def technical_scores(price_panel: Dict[str,pd.Series]) -> pd.DataFrame:
+def technical_scores(price_panel: Dict[str, pd.Series]) -> pd.DataFrame:
     rows=[]
     for ticker, px in price_panel.items():
         px=px.dropna()
         if len(px)<60: continue
-        ema50=ema(px,50)
-        base50=ema50.iloc[-1] if pd.notna(ema50.iloc[-1]) and ema50.iloc[-1]!=0 else np.nan
+        ema50  = ema(px,50)
+        base50 = ema50.iloc[-1] if pd.notna(ema50.iloc[-1]) and ema50.iloc[-1]!=0 else np.nan
         dma_gap=(px.iloc[-1]-ema50.iloc[-1])/base50 if pd.notna(base50) else np.nan
-        _,_,hist=macd(px)
-        macd_hist=hist.iloc[-1] if len(hist)>0 else np.nan
-        r=rsi(px).iloc[-1] if len(px)>14 else np.nan
-        rsi_strength=(r-50.0)/50.0 if pd.notna(r) else np.nan
-        mom=np.nan
-        if len(px)>252:
-            try: mom=px.iloc[-1]/px.iloc[-253]-1.0
-            except Exception: mom=np.nan
+        _,_,hist = macd(px)
+        macd_hist = hist.iloc[-1] if len(hist)>0 else np.nan
+        r = rsi(px).iloc[-1] if len(px)>14 else np.nan
+        rsi_strength = (r-50.0)/50.0 if pd.notna(r) else np.nan
+        mom = np.nan
+        if len(px) > 252:
+            try: mom = px.iloc[-1]/px.iloc[-253]-1.0
+            except Exception: mom = np.nan
         rows.append({"ticker":ticker,"dma_gap":dma_gap,"macd_hist":macd_hist,
                      "rsi_strength":rsi_strength,"mom12m":mom})
     return pd.DataFrame(rows).set_index("ticker") if rows else pd.DataFrame()
@@ -328,20 +364,23 @@ def technical_scores(price_panel: Dict[str,pd.Series]) -> pd.DataFrame:
 def macro_from_vix(vix_series: pd.Series):
     if vix_series is None or vix_series.empty:
         return 0.5, np.nan, np.nan, np.nan
-    vix_last=float(vix_series.iloc[-1])
-    ema20=float(ema(vix_series,20).iloc[-1]) if len(vix_series)>=20 else vix_last
-    rel_gap=(vix_last-ema20)/max(ema20,1e-9)
-    if vix_last<=12: level=1.0
+    vix_last = float(vix_series.iloc[-1])
+    ema20    = float(ema(vix_series,20).iloc[-1]) if len(vix_series)>=20 else vix_last
+    rel_gap  = (vix_last-ema20)/max(ema20,1e-9)
+    if   vix_last<=12: level=1.0
     elif vix_last>=28: level=0.0
-    else: level=1.0-(vix_last-12)/16.0
+    else: level = 1.0-(vix_last-12)/16.0
     if   rel_gap>=0.03: trend=0.0
     elif rel_gap<=-0.03: trend=1.0
     else:
-        trend=1.0-(rel_gap+0.03)/0.06; trend=float(np.clip(trend,0,1))
+        trend = 1.0-(rel_gap+0.03)/0.06
+        trend = float(np.clip(trend,0,1))
     macro=float(np.clip(0.70*level+0.30*trend,0,1))
     return macro, vix_last, ema20, rel_gap
 
-# ==========================  Fundamentals interpretation  ==========================
+# ---------------------------------------------------------------------
+# Fundamentals interpretation
+# ---------------------------------------------------------------------
 
 def fundamentals_interpretation(zrow: pd.Series) -> List[str]:
     lines=[]
@@ -352,10 +391,14 @@ def fundamentals_interpretation(zrow: pd.Series) -> List[str]:
         else:
             return "bullish (cheap)" if v>=0.5 else "watch (expensive)" if v<=-0.5 else "neutral"
 
-    g=bucket(zrow.get("revenueGrowth_z")); e=bucket(zrow.get("earningsGrowth_z"))
-    pm=bucket(zrow.get("profitMargins_z")); gm=bucket(zrow.get("grossMargins_z"))
-    om=bucket(zrow.get("operatingMargins_z")); roe=bucket(zrow.get("returnOnEquity_z"))
-    val=bucket(zrow.get("forwardPE_z"), pos_good=False); lev=bucket(zrow.get("debtToEquity_z"), pos_good=False)
+    g  = bucket(zrow.get("revenueGrowth_z"))
+    e  = bucket(zrow.get("earningsGrowth_z"))
+    pm = bucket(zrow.get("profitMargins_z"))
+    gm = bucket(zrow.get("grossMargins_z"))
+    om = bucket(zrow.get("operatingMargins_z"))
+    roe= bucket(zrow.get("returnOnEquity_z"))
+    val= bucket(zrow.get("forwardPE_z"), pos_good=False)
+    lev= bucket(zrow.get("debtToEquity_z"), pos_good=False)
 
     if g=="bullish" or e=="bullish": lines.append("**Growth tilt:** above-peer revenue/earnings growth (supportive).")
     elif g=="watch" or e=="watch":   lines.append("**Growth tilt:** below peers — watch for stabilization or re-acceleration.")
@@ -368,24 +411,34 @@ def fundamentals_interpretation(zrow: pd.Series) -> List[str]:
     else:
         lines.append("**Profitability:** roughly peer-like.")
 
-    if val.startswith("bullish"): lines.append("**Valuation tilt:** cheaper than peers (potential multiple support).")
-    elif val.startswith("watch"): lines.append("**Valuation tilt:** richer than peers — execution must stay strong.")
-    else:                         lines.append("**Valuation tilt:** roughly fair vs peers.")
+    if val.startswith("bullish"):
+        lines.append("**Valuation tilt:** cheaper than peers (potential multiple support).")
+    elif val.startswith("watch"):
+        lines.append("**Valuation tilt:** richer than peers — execution must stay strong.")
+    else:
+        lines.append("**Valuation tilt:** roughly fair vs peers.")
 
-    if lev.startswith("bullish"): lines.append("**Balance sheet:** lower leverage vs peers (lower financial risk).")
-    elif lev.startswith("watch"): lines.append("**Balance sheet:** higher leverage vs peers — keep an eye on rates/cash flow.")
-    else:                         lines.append("**Balance sheet:** typical for the peer set.")
+    if lev.startswith("bullish"):
+        lines.append("**Balance sheet:** lower leverage vs peers (lower financial risk).")
+    elif lev.startswith("watch"):
+        lines.append("**Balance sheet:** higher leverage vs peers — keep an eye on rates/cash flow.")
+    else:
+        lines.append("**Balance sheet:** typical for the peer set.")
     return lines
 
-# ==========================  Portfolio editor helpers  ==========================
+# ---------------------------------------------------------------------
+# Portfolio editor helpers
+# ---------------------------------------------------------------------
 
-CURRENCY_MAP={"$":"USD","€":"EUR","£":"GBP","CHF":"CHF","C$":"CAD","A$":"AUD","¥":"JPY"}
+CURRENCY_MAP = {"$":"USD","€":"EUR","£":"GBP","CHF":"CHF","C$":"CAD","A$":"AUD","¥":"JPY"}
+
 def _safe_num(x): return pd.to_numeric(x, errors="coerce")
 
 def normalize_percents_to_100(p: pd.Series) -> pd.Series:
-    p=_safe_num(p).fillna(0.0); s=p.sum()
-    if s<=0: return p
-    return (p/s)*100.0
+    p = _safe_num(p).fillna(0.0)
+    s = p.sum()
+    if s <= 0: return p
+    return (p / s) * 100.0
 
 def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFrame:
     df=df.copy()
@@ -395,27 +448,30 @@ def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFra
     if n==0:
         df["weight"]=[]
         return df
+
     df["Percent (%)"]=_safe_num(df.get("Percent (%)"))
     df["Amount"]=_safe_num(df.get("Amount"))
-    has_total=(total is not None and total>0)
+    has_total = (total is not None and total>0)
 
     if has_total:
         if mode=="percent":
-            if df["Percent (%)"].fillna(0).sum()==0: df["Percent (%)"]=100.0/n
-            df["Percent (%)"]=normalize_percents_to_100(df["Percent (%)"]).round(2)
+            if df["Percent (%)"].fillna(0).sum()==0:
+                df["Percent (%)"]=100.0/n
+            df["Percent (%)"] = normalize_percents_to_100(df["Percent (%)"]).round(2)
             df["Amount"]=(df["Percent (%)"]/100.0*total).round(2)
         else:
             s=df["Amount"].fillna(0).sum()
             if s>0:
-                df["Percent (%)"]=(df["Amount"]/total*100.0).round(2)
-                df["Percent (%)"]=normalize_percents_to_100(df["Percent (%)"]).round(2)
-                df["Amount"]=(df["Percent (%)"]/100.0*total).round(2)
+                df["Percent (%)"]= (df["Amount"]/total*100.0).round(2)
+                df["Percent (%)"]= normalize_percents_to_100(df["Percent (%)"]).round(2)
+                df["Amount"]= (df["Percent (%)"]/100.0*total).round(2)
             else:
                 df["Percent (%)"]=100.0/n
-                df["Amount"]=(df["Percent (%)"]/100.0*total).round(2)
+                df["Amount"]= (df["Percent (%)"]/100.0*total).round(2)
     else:
-        if df["Percent (%)"].fillna(0).sum()==0: df["Percent (%)"]=100.0/n
-        df["Percent (%)"]=normalize_percents_to_100(df["Percent (%)"]).round(2)
+        if df["Percent (%)"].fillna(0).sum()==0:
+            df["Percent (%)"]=100.0/n
+        df["Percent (%)"]= normalize_percents_to_100(df["Percent (%)"]).round(2)
 
     if has_total and df["Amount"].fillna(0).sum()>0:
         w=df["Amount"].fillna(0)/df["Amount"].fillna(0).sum()
@@ -426,31 +482,38 @@ def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFra
     df["weight"]=w
     return df
 
-def holdings_editor_form(currency_symbol: str, total_value: float) -> Tuple[pd.DataFrame,pd.DataFrame]:
+def holdings_editor_form(currency_symbol: str, total_value: float) -> Tuple[pd.DataFrame, pd.DataFrame]:
     if st.session_state.get("grid_df") is None:
-        st.session_state["grid_df"]=pd.DataFrame({
-            "Ticker":["AAPL","MSFT","NVDA","AMZN"],
-            "Percent (%)":[25.0,25.0,25.0,25.0],
-            "Amount":[np.nan,np.nan,np.nan,np.nan],
+        st.session_state["grid_df"] = pd.DataFrame({
+            "Ticker": ["AAPL", "MSFT", "NVDA", "AMZN"],
+            "Percent (%)": [25.0, 25.0, 25.0, 25.0],
+            "Amount": [np.nan, np.nan, np.nan, np.nan],
         })
 
     st.markdown(
         f"**Holdings**  \n"
         f"<span class='small-muted'>Enter <b>Ticker</b> and either <b>Percent (%)</b> or "
-        f"<b>Amount ({currency_symbol})</b>. Click <b>Apply changes</b> to sync. "
-        f"Use <b>Normalize</b> to force exactly 100% in percent mode.</span>",
+        f"<b>Amount ({currency_symbol})</b>. Values update only when you click "
+        f"<b>Apply changes</b>. Use <b>Normalize</b> to force exactly 100% in percent mode.</span>",
         unsafe_allow_html=True,
     )
 
-    committed=st.session_state["grid_df"].copy()
+    committed = st.session_state["grid_df"].copy()
 
     with st.form("holdings_form", clear_on_submit=False):
-        sync_mode=st.segmented_control("Sync mode",
-            options=["Percent → Amount","Amount → Percent"], default="Percent → Amount")
-        mode_key={"Percent → Amount":"percent","Amount → Percent":"amount"}[sync_mode]
+        sync_mode = st.segmented_control(
+            "Sync mode",
+            options=["Percent → Amount", "Amount → Percent"],
+            default="Percent → Amount",
+            help="Choose which side drives on Apply."
+        )
+        mode_key = {"Percent → Amount": "percent", "Amount → Percent": "amount"}[sync_mode]
 
-        edited=st.data_editor(
-            committed, num_rows="dynamic", use_container_width=True, hide_index=True,
+        edited = st.data_editor(
+            committed,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
             column_config={
                 "Ticker": st.column_config.TextColumn(width="small"),
                 "Percent (%)": st.column_config.NumberColumn(format="%.2f"),
@@ -458,312 +521,402 @@ def holdings_editor_form(currency_symbol: str, total_value: float) -> Tuple[pd.D
             },
             key="grid_form",
         )
-        col_a,col_b=st.columns([1,1])
-        apply_btn=col_a.form_submit_button("Apply changes", type="primary", use_container_width=True)
-        normalize_btn=col_b.form_submit_button("Normalize to 100% (percent mode)", use_container_width=True)
+
+        col_a, col_b = st.columns([1, 1])
+        apply_btn = col_a.form_submit_button("Apply changes", type="primary", use_container_width=True)
+        normalize_btn = col_b.form_submit_button("Normalize to 100% (percent mode)", use_container_width=True)
 
     if normalize_btn:
-        syncd=edited.copy()
-        syncd["Percent (%)"]=normalize_percents_to_100(_safe_num(syncd.get("Percent (%)")))
+        syncd = edited.copy()
+        syncd["Percent (%)"] = normalize_percents_to_100(_safe_num(syncd.get("Percent (%)")))
         if total_value and total_value>0:
-            syncd["Amount"]=(syncd["Percent (%)"]/100.0*total_value).round(2)
-        st.session_state["grid_df"]=syncd[["Ticker","Percent (%)","Amount"]]
-    elif apply_btn:
-        syncd=sync_percent_amount(edited.copy(), total_value, mode_key)
-        st.session_state["grid_df"]=syncd[["Ticker","Percent (%)","Amount"]]
+            syncd["Amount"] = (syncd["Percent (%)"]/100.0*total_value).round(2)
+        st.session_state["grid_df"] = syncd[["Ticker","Percent (%)","Amount"]]
 
-    current=st.session_state["grid_df"].copy()
-    out=current.copy(); out["ticker"]=out["Ticker"].map(yf_symbol)
-    out=out[out["ticker"].astype(bool)]
+    elif apply_btn:
+        syncd = sync_percent_amount(edited.copy(), total_value, mode_key)
+        st.session_state["grid_df"] = syncd[["Ticker","Percent (%)","Amount"]]
+
+    current = st.session_state["grid_df"].copy()
+    out = current.copy()
+    out["ticker"] = out["Ticker"].map(yf_symbol)
+    out = out[out["ticker"].astype(bool)]
 
     if total_value and total_value>0 and _safe_num(out["Amount"]).sum()>0:
-        w=_safe_num(out["Amount"])/_safe_num(out["Amount"]).sum()
+        w = _safe_num(out["Amount"]) / _safe_num(out["Amount"]).sum()
     elif _safe_num(out["Percent (%)"]).sum()>0:
-        w=_safe_num(out["Percent (%)"])/_safe_num(out["Percent (%)"]).sum()
+        w = _safe_num(out["Percent (%)"]) / _safe_num(out["Percent (%)"]).sum()
     else:
-        n=max(len(out),1); w=pd.Series([1.0/n]*n, index=out.index)
+        n = max(len(out),1)
+        w = pd.Series([1.0/n]*n, index=out.index)
 
-    df_hold=pd.DataFrame({"ticker": out["ticker"], "weight": w})
+    df_hold = pd.DataFrame({"ticker": out["ticker"], "weight": w})
     return df_hold, current
 
-# ==========================  Statements (CLEAN & ORDERED AUTOMATICALLY) ==========================
+# ---------------------------------------------------------------------
+# Financial statements (ordered like real statements)
+# ---------------------------------------------------------------------
 
-CURRENCY_SYMBOL = {
-    "USD":"$", "EUR":"€", "GBP":"£", "JPY":"¥", "CAD":"C$", "AUD":"A$", "CHF":"CHF",
-    "SEK":"kr","NOK":"kr","DKK":"kr","HKD":"HK$","CNY":"¥","INR":"₹","SGD":"S$"
+# currency symbol map exposed to pages
+_CURRENCY_SYMBOL = {
+    "USD": "$", "EUR": "€", "GBP": "£", "JPY": "¥", "CAD": "C$", "AUD": "A$", "CHF": "CHF",
+    "SEK": "kr", "NOK": "kr", "DKK": "kr", "HKD": "HK$", "CNY": "¥", "INR": "₹", "SGD": "S$"
 }
-_CURRENCY_SYMBOL = CURRENCY_SYMBOL  # backward-compat
 
-def _norm(s: str) -> str:
+# --- detection helpers ---
+def _norm_rowname(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(s).lower())
-
-# Canonical row orders
-INCOME_ORDER = [
-    "totalrevenue","revenue","sales",
-    "costofrevenue","costofgoodsold","cogs",
-    "grossprofit",
-    "sellinggeneraladministrative","sga","researchdevelopment","rd",
-    "depreciationamortization","reconciledepreciation","amortization",
-    "otheroperatingexpenses","operatingexpenses",
-    "operatingincome","operatingprofit","ebit",
-    "interestincome","interestexpense","netinterestincome","otherincomeexpensenet",
-    "pretaxincome","incomebeforetax","ebt",
-    "incometaxexpense","taxexpense",
-    "netincome","netincomefromcontinuing","netincometocommon","netincomeapplicabletocommonshares"
-]
-BALANCE_ORDER = [
-    "cashandcashequivalents","shortterminvestments","restrictedcash",
-    "netreceivables","inventory","othercurrentassets","totalcurrentassets",
-    "propertyplantequipment","goodwill","intangibles","otherassets","totalassets",
-    "accountspayable","othercurrentliab","shortlongtermdebt","currentportionoflongtermdebt",
-    "totallongtermdebt","otherliabilities","totalcurrentliabilities","totalliab","totalliabilities",
-    "retainedearnings","treasurystock","additionalpaidincapital","commonstock",
-    "totalstockholderequity","totalequity"
-]
-CASHFLOW_ORDER = [
-    "netincome","depreciation","depreciationamortization","reconciledepreciation",
-    "deferredtaxes","stockbasedcompensation","changestoworkingcapital",
-    "totalcashfromoperatingactivities","netcashprovidedbyoperatingactivities",
-    "capitalexpenditures","investments","purchaseofinvestments","saleofinvestments",
-    "acquisitionsnet","otherinvestingcashflows","totalcashflowsfrominvestingactivities",
-    "dividendspaid","repurchaseofstock","issuanceofstock","netissuanceofdebt",
-    "otherfinancingcashflows","totalcashfromfinancingactivities","totalcashflowsfromfinancingactivities",
-    "effectofexchangeratechanges","changeincash","netchangeincash"
-]
-
-def _priority(order: List[str]) -> Dict[str,int]:
-    return {k:i for i,k in enumerate(order)}
-
-def _reorder(df: pd.DataFrame, order: List[str]) -> pd.DataFrame:
-    if df is None or df.empty: return df
-    pr=_priority(order); keys=[]
-    for idx in df.index.astype(str):
-        score=pr.get(_norm(idx), 10_000)
-        keys.append((score, idx))
-    keys.sort(key=lambda x:(x[0], str(x[1]).lower()))
-    return df.loc[[idx for _,idx in keys]]
-
-def _to_pretty_date_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """Sort cols by date, then convert to 'YYYY-MM-DD' strings (prevents bound-method headers)."""
-    if df is None or df.empty: return df
-    try:
-        dt_cols=pd.to_datetime(df.columns)
-        order=np.argsort(dt_cols.values)
-        df=df.iloc[:, order]
-        df.columns=[pd.to_datetime(c).date().strftime("%Y-%m-%d") for c in df.columns]
-    except Exception:
-        df.columns=[str(c) for c in df.columns]
-    return df
-
-def _clean_raw_statement(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or isinstance(df,float) or (hasattr(df,'empty') and df.empty): return pd.DataFrame()
-    out=df.copy()
-    out=out[~out.index.duplicated(keep="first")]
-    for c in out.columns: out[c]=pd.to_numeric(out[c], errors="coerce")
-    return _to_pretty_date_cols(out)
-
-@st.cache_data(show_spinner=False)
-def fetch_company_statements(ticker: str) -> Dict[str, object]:
-    """Returns ALREADY CLEANED + ORDERED statements with pretty date headers."""
-    t = yf.Ticker(yf_symbol(ticker))
-    try: info = t.info or {}
-    except Exception: info = {}
-    currency = info.get("financialCurrency") or info.get("currency") or "USD"
-
-    def get(attr, kind):
-        try: raw = getattr(t, attr)
-        except Exception: return pd.DataFrame()
-        clean=_clean_raw_statement(raw)
-        if kind=="income":   return _reorder(clean, INCOME_ORDER)
-        if kind=="balance":  return _reorder(clean, BALANCE_ORDER)
-        if kind=="cashflow": return _reorder(clean, CASHFLOW_ORDER)
-        return clean
-
-    return {
-        "currency": currency,
-        "income":   get("financials", "income"),
-        "balance":  get("balance_sheet", "balance"),
-        "cashflow": get("cashflow", "cashflow"),
-        "income_q":   get("quarterly_financials","income"),
-        "balance_q":  get("quarterly_balance_sheet","balance"),
-        "cashflow_q": get("quarterly_cashflow","cashflow"),
-    }
-
-def _scale_unit(df: pd.DataFrame) -> Tuple[pd.DataFrame,str]:
-    if df is None or df.empty: return df,""
-    vals = pd.to_numeric(df.replace([np.inf,-np.inf],np.nan).stack(), errors="coerce").dropna()
-    if vals.empty: return df,""
-    m=float(np.nanmedian(np.abs(vals)))
-    if m>=1e9:  return (df/1e9).round(2), " (billions)"
-    if m>=1e6:  return (df/1e6).round(2), " (millions)"
-    if m>=1e3:  return (df/1e3).round(2), " (thousands)"
-    return df.round(2), ""
-
-def tidy_statement_for_display(df: pd.DataFrame, take: int=4, newest_first: bool=True, kind: Optional[str]=None) -> pd.DataFrame:
-    """If you still call this from pages, it keeps last N periods and keeps newest left."""
-    if df is None or df.empty: return pd.DataFrame()
-    work=df.copy()
-    # columns are already pretty strings like 'YYYY-MM-DD' — use them to sort
-    try:
-        dt=pd.to_datetime(work.columns)
-        order=np.argsort(dt.values)  # old->new
-        work=work.iloc[:, order]
-    except Exception:
-        pass
-    work=work.iloc[:, -take:]
-    if newest_first:
-        work=work[work.columns[::-1]]
-    # numeric cleanup
-    for c in work.columns:
-        work[c]=pd.to_numeric(work[c], errors="coerce").round(2)
-    return work
-
-# ===== Metrics + narrative (unchanged APIs) =====
 
 def _pick(df: pd.DataFrame, candidates: List[str]) -> Optional[pd.Series]:
     if df is None or df.empty: return None
-    norm_index={_norm(i): i for i in df.index.astype(str)}
+    norm_index = { _norm_rowname(idx): idx for idx in df.index.astype(str) }
     for c in candidates:
-        key=_norm(c)
-        if key in norm_index: return pd.to_numeric(df.loc[norm_index[key]], errors="coerce")
+        key = _norm_rowname(c)
+        if key in norm_index:
+            return pd.to_numeric(df.loc[norm_index[key]], errors="coerce")
     for c in candidates:
-        key=_norm(c)
-        for k,orig in norm_index.items():
-            if key in k: return pd.to_numeric(df.loc[orig], errors="coerce")
+        key = _norm_rowname(c)
+        for k, orig in norm_index.items():
+            if key in k:
+                return pd.to_numeric(df.loc[orig], errors="coerce")
     return None
 
-def statement_metrics(stmts: Dict[str,object]) -> Dict[str,float]:
-    inc=stmts.get("income",pd.DataFrame())
-    bs =stmts.get("balance",pd.DataFrame())
-    cf =stmts.get("cashflow",pd.DataFrame())
+def _clean_statement(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df is float or df is int or getattr(df, "empty", True):
+        return pd.DataFrame()
+    out = df.copy()
+    out = out[~out.index.duplicated(keep="first")]
+    for c in out.columns:
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+    try:
+        out.columns = pd.to_datetime(out.columns)
+        out = out.sort_index(axis=1)  # oldest → newest
+    except Exception:
+        pass
+    return out
+
+@st.cache_data(show_spinner=False)
+def fetch_company_statements(ticker: str) -> Dict[str, object]:
+    t = yf.Ticker(yf_symbol(ticker))
+    try:
+        info = t.info or {}
+    except Exception:
+        info = {}
+    currency = info.get("financialCurrency") or info.get("currency") or "USD"
+
+    def safe(attr):
+        try:
+            return _clean_statement(getattr(t, attr))
+        except Exception:
+            return pd.DataFrame()
+
+    return {
+        "currency": currency,
+        "income":  safe("financials"),
+        "balance": safe("balance_sheet"),
+        "cashflow": safe("cashflow"),
+        "income_q":  safe("quarterly_financials"),
+        "balance_q": safe("quarterly_balance_sheet"),
+        "cashflow_q": safe("quarterly_cashflow"),
+    }
+
+# --- canonical row orders (with synonyms) ---
+
+CANON_INCOME = [
+    ("Total Revenue", ["Total Revenue","Revenue","Sales","Operating Revenue"]),
+    ("Cost of Revenue", ["Cost Of Revenue","Cost of Goods Sold","Cost Of Goods Sold","Cost of Revenue"]),
+    ("Gross Profit", ["Gross Profit"]),
+    ("Research & Development", ["Research Development","R&D","Research And Development"]),
+    ("Selling, General & Admin", ["Selling General Administrative","SG&A","Selling General And Administrative"]),
+    ("Other Operating Expenses", ["Other Operating Expenses","Other Operating Expense"]),
+    ("Operating Income (EBIT)", ["Operating Income","Operating Profit","Ebit","EBIT"]),
+    ("Non-operating Gains/Losses", ["Other Income Expense Net","Total Other Income Expense Net",
+                                   "Net Non Operating Interest Income Expense","Other Non Operating Income Expense"]),
+    ("Interest Expense", ["Interest Expense","Interest Expense Non Operating"]),
+    ("Pretax Income (EBT)", ["Income Before Tax","Pretax Income","Ebt","Earnings Before Tax"]),
+    ("Income Tax Expense", ["Income Tax Expense","Provision For Income Taxes"]),
+    ("Net Income", ["Net Income","Net Income Common Stockholders",
+                    "Net Income Applicable To Common Shares","Net Income Including Noncontrolling Interests"]),
+    ("Diluted EPS", ["Diluted EPS","Diluted EPS Total","Diluted Earnings Per Share"]),
+]
+
+CANON_BALANCE_ASSETS = [
+    ("Cash & Cash Equivalents", ["Cash And Cash Equivalents","Cash","Cash Equivalents"]),
+    ("Short-Term Investments", ["Short Term Investments","Short Term Marketable Securities"]),
+    ("Accounts Receivable", ["Net Receivables","Accounts Receivable"]),
+    ("Inventory", ["Inventory","Total Inventory"]),
+    ("Other Current Assets", ["Other Current Assets"]),
+    ("Total Current Assets", ["Total Current Assets"]),
+    ("Property, Plant & Equipment (net)", ["Property Plant Equipment","Property Plant And Equipment Net",
+                                           "Net Property Plant And Equipment"]),
+    ("Goodwill", ["Good Will","Goodwill"]),
+    ("Intangible Assets", ["Intangible Assets","Other Intangible Assets"]),
+    ("Long-Term Investments", ["Long Term Investments"]),
+    ("Other Non-current Assets", ["Other Assets","Other Non Current Assets"]),
+    ("Total Assets", ["Total Assets"]),
+]
+
+CANON_BALANCE_LIABS = [
+    ("Accounts Payable", ["Accounts Payable"]),
+    ("Short-Term Debt", ["Short Long Term Debt","Short Term Debt","Current Portion Of Long Term Debt"]),
+    ("Other Current Liabilities", ["Other Current Liab","Other Current Liabilities"]),
+    ("Total Current Liabilities", ["Total Current Liabilities"]),
+    ("Long-Term Debt", ["Long Term Debt","Long Term Debt Noncurrent"]),
+    ("Deferred Tax & Other Liabilities", ["Deferred Long Term Liab","Deferred Revenue Non Current",
+                                          "Deferred Long Term Asset Charges"]),
+    ("Total Liabilities", ["Total Liab","Total Liabilities"]),
+]
+
+CANON_BALANCE_EQUITY = [
+    ("Common Stock", ["Common Stock","Common Stock Equity"]),
+    ("Additional Paid-in Capital", ["Additional Paid In Capital","Capital Surplus","Capital Stock"]),
+    ("Retained Earnings", ["Retained Earnings","Retained Earnings (Accumulated Deficit)"]),
+    ("Treasury Stock", ["Treasury Stock","Treasury Stock Value"]),
+    ("Accumulated OCI", ["Accumulated Other Comprehensive Income Loss","Aoci"]),
+    ("Minority Interest", ["Minority Interest","Noncontrolling Interest"]),
+    ("Total Equity", ["Total Stockholder Equity","Total Shareholder Equity","Total Equity"]),
+    ("Total Liabilities & Equity", ["Total Liabilities And Stockholders Equity",
+                                   "Total Liabilities & Stockholders Equity"]),
+]
+
+CANON_CASHFLOW = [
+    ("Net Income", ["Net Income","Net Income Applicable To Common Shares","Net Income Common Stockholders"]),
+    ("Depreciation & Amortization", ["Depreciation","Depreciation And Amortization","Reconciled Depreciation"]),
+    ("Stock-Based Compensation", ["Stock Based Compensation","Stock Based Compensation Expense"]),
+    ("Deferred Taxes", ["Deferred Income Tax","Deferred Tax"]),
+    ("Change in Working Capital", ["Change In Working Capital"]),
+    ("Other Operating Activities", ["Other Non Cash Items","Other Operating Activities"]),
+    ("Net Cash from Operating", ["Total Cash From Operating Activities","Net Cash Provided By Operating Activities"]),
+
+    ("Capital Expenditures (CapEx)", ["Capital Expenditures","Investments In Property Plant And Equipment"]),
+    ("Acquisitions / Investments", ["Acquisitions Net","Purchase Of Investments","Sale Of Investments"]),
+    ("Other Investing", ["Other Cashflows From Investing Activities"]),
+    ("Net Cash from Investing", ["Total Cashflows From Investing Activities","Net Cash Used For Investing Activities"]),
+
+    ("Dividends Paid", ["Dividends Paid"]),
+    ("Share Repurchase", ["Repurchase Of Stock","Common Stock Repurchased"]),
+    ("Debt Issued (repaid)", ["Net Borrowings","Issuance Of Debt","Repayment Of Debt"]),
+    ("Other Financing", ["Other Cashflows From Financing Activities"]),
+    ("Net Cash from Financing", ["Total Cash From Financing Activities",
+                                 "Net Cash Used Provided By Financing Activities"]),
+
+    ("Net Change in Cash", ["Net Change In Cash","Effect Of Exchange Rate Changes"]),
+    ("Free Cash Flow", ["Free Cash Flow"]),  # also computed
+]
+
+def _reorder_by_canon(df: pd.DataFrame, canon: List[Tuple[str,List[str]]]) -> pd.DataFrame:
+    if df is None or df.empty: return df
+    norm_index = {_norm_rowname(i): i for i in df.index.astype(str)}
+    used = set(); ordered = []
+    for nice, synonyms in canon:
+        found = None
+        for syn in synonyms:
+            key = _norm_rowname(syn)
+            if key in norm_index: found = norm_index[key]; break
+        if not found:
+            for syn in synonyms:
+                key = _norm_rowname(syn)
+                for k, orig in norm_index.items():
+                    if key in k: found = orig; break
+                if found: break
+        if found and found not in used:
+            ordered.append((nice, found)); used.add(found)
+    for orig in df.index.astype(str):
+        if orig not in used: ordered.append((orig, orig))
+    new_idx = [label for label, _ in ordered]
+    src_idx = [orig  for _, orig  in ordered]
+    out = df.loc[src_idx].copy()
+    out.index = new_idx
+    return out
+
+def reorder_income(df: pd.DataFrame) -> pd.DataFrame:
+    return _reorder_by_canon(df, CANON_INCOME)
+
+def reorder_balance(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty: return df
+    assets = _reorder_by_canon(df, CANON_BALANCE_ASSETS)
+    liabs  = _reorder_by_canon(df, CANON_BALANCE_LIABS)
+    equity = _reorder_by_canon(df, CANON_BALANCE_EQUITY)
+    seen=set(); rows=[]
+    for block in (assets, liabs, equity):
+        for r in block.index:
+            if r not in seen: seen.add(r); rows.append(r)
+    for r in df.index:
+        if r not in seen: rows.append(r)
+    return df.loc[[r for r in rows if r in df.index]].copy()
+
+def reorder_cashflow(df: pd.DataFrame) -> pd.DataFrame:
+    return _reorder_by_canon(df, CANON_CASHFLOW)
+
+def _scale_unit(df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
+    if df is None or df.empty: return df, ""
+    vals = pd.to_numeric(df.replace([np.inf, -np.inf], np.nan).stack(), errors="coerce").dropna()
+    if vals.empty: return df, ""
+    m = np.nanmedian(np.abs(vals))
+    if m >= 1e9:  return (df/1e9).round(2), " (billions)"
+    if m >= 1e6:  return (df/1e6).round(2), " (millions)"
+    if m >= 1e3:  return (df/1e3).round(2), " (thousands)"
+    return df.round(2), ""
+
+def tidy_statement_for_display(df: pd.DataFrame, take: int = 4, stype: Optional[str] = None) -> pd.DataFrame:
+    """
+    Format a statement for display (ordered rows, newest columns at right).
+    stype: 'income' | 'balance' | 'cash' | None (no reordering if None).
+    """
+    if df is None or df.empty: return pd.DataFrame()
+    if stype == "income":
+        df = reorder_income(df)
+    elif stype == "balance":
+        df = reorder_balance(df)
+    elif stype == "cash":
+        df = reorder_cashflow(df)
+
+    out = df.copy()
+    try:
+        out.columns = pd.to_datetime(out.columns)
+        out = out.sort_index(axis=1)  # oldest → newest
+    except Exception:
+        pass
+    out = out.iloc[:, -take:]  # last N periods
+    # label columns as ISO dates
+    new_cols = []
+    for c in out.columns:
+        try: new_cols.append(pd.to_datetime(c).date().isoformat())
+        except Exception: new_cols.append(str(c))
+    out.columns = new_cols
+    return out
+
+# ---- ratios + narrative ----
+
+def statement_metrics(stmts: Dict[str, object]) -> Dict[str, float]:
+    inc = stmts.get("income", pd.DataFrame())
+    bs  = stmts.get("balance", pd.DataFrame())
+    cf  = stmts.get("cashflow", pd.DataFrame())
+
+    def last(series): 
+        return (series.dropna().iloc[-1] if series is not None and series.dropna().size else np.nan)
+    def prev(series):
+        return (series.dropna().iloc[-2] if series is not None and series.dropna().size>1 else np.nan)
 
     rev   = _pick(inc, ["Total Revenue","Revenue","Sales"])
     gross = _pick(inc, ["Gross Profit"])
     opinc = _pick(inc, ["Operating Income","Operating Profit","Ebit"])
-    net   = _pick(inc, ["Net Income","Net Income Applicable To Common Shares","Net Income Common Stockholders"])
+    net   = _pick(inc, ["Net Income","Net Income Common Stockholders"])
     intr  = _pick(inc, ["Interest Expense","Interest Expense Non Operating"])
 
-    ta    = _pick(bs, ["Total Assets"])
-    teq   = _pick(bs, ["Total Stockholder Equity","Total Equity","Total Shareholder Equity"])
-    tliab = _pick(bs, ["Total Liab","Total Liabilities"])
-    ca    = _pick(bs, ["Total Current Assets"])
-    cl    = _pick(bs, ["Total Current Liabilities"])
-    inv   = _pick(bs, ["Inventory"])
-    ltd   = _pick(bs, ["Long Term Debt"])
-    std   = _pick(bs, ["Short Long Term Debt","Short-Term Debt","Current Portion of Long Term Debt"])
-    notes = _pick(bs, ["Notes Payable"])
+    ta    = _pick(bs,  ["Total Assets"])
+    teq   = _pick(bs,  ["Total Stockholder Equity","Total Equity","Total Shareholder Equity"])
+    tliab = _pick(bs,  ["Total Liab","Total Liabilities"])
+    ca    = _pick(bs,  ["Total Current Assets"])
+    cl    = _pick(bs,  ["Total Current Liabilities"])
+    inv   = _pick(bs,  ["Inventory"])
+    ltd   = _pick(bs,  ["Long Term Debt"])
+    std   = _pick(bs,  ["Short Long Term Debt","Short Term Debt"])
 
-    ocf   = _pick(cf, ["Total Cash From Operating Activities","Net Cash Provided By Operating Activities"])
-    capex = _pick(cf, ["Capital Expenditures","Investments In Property Plant And Equipment"])
+    ocf   = _pick(cf,  ["Total Cash From Operating Activities","Operating Cash Flow"])
+    capex = _pick(cf,  ["Capital Expenditures","Investments In Property Plant And Equipment"])
 
-    def last(s): return (s.dropna().iloc[-1] if s is not None and s.dropna().size else np.nan)
-    def prev(s): return (s.dropna().iloc[-2] if s is not None and s.dropna().size>1 else np.nan)
+    revenue      = float(last(rev))
+    revenue_prev = float(prev(rev))
+    gross_profit = float(last(gross))
+    operating_inc= float(last(opinc))
+    net_income   = float(last(net))
+    interest_exp = abs(float(last(intr))) if not np.isnan(last(intr)) else np.nan
 
-    revenue=float(last(rev)); revenue_prev=float(prev(rev))
-    gross_profit=float(last(gross)); operating_inc=float(last(opinc)); net_income=float(last(net))
-    interest_exp=abs(float(last(intr))) if not np.isnan(last(intr)) else np.nan
+    total_assets = float(last(ta))
+    equity       = float(last(teq)) if not np.isnan(last(teq)) else (float(last(ta)) - float(last(tliab)) if not (np.isnan(last(ta)) or np.isnan(last(tliab))) else np.nan)
+    current_assets     = float(last(ca))
+    current_liabilities= float(last(cl))
+    inventory          = float(last(inv))
+    lt_debt            = float(last(ltd))
+    st_debt            = float(last(std))
+    total_debt         = np.nansum([lt_debt, st_debt])
 
-    total_assets=float(last(ta))
-    equity=float(last(teq)) if teq is not None else np.nan
-    if np.isnan(equity):
-        equity = float(last(ta)) - float(last(tliab)) if not (np.isnan(last(ta)) or np.isnan(last(tliab))) else np.nan
+    op_cash_flow = float(last(ocf))
+    capex_val    = float(last(capex))
+    fcf          = op_cash_flow - (capex_val if not np.isnan(capex_val) else 0.0)
 
-    current_assets=float(last(ca)); current_liabilities=float(last(cl)); inventory=float(last(inv))
-    lt_debt=float(last(ltd)); st_debt=float(last(std)); notes_pay=float(last(notes))
-    total_debt=np.nansum([lt_debt, st_debt, notes_pay])
+    gross_margin      = (gross_profit/revenue) if revenue else np.nan
+    operating_margin  = (operating_inc/revenue) if revenue else np.nan
+    net_margin        = (net_income/revenue) if revenue else np.nan
+    fcf_margin        = (fcf/revenue) if revenue else np.nan
+    revenue_yoy       = (revenue/revenue_prev - 1.0) if (revenue_prev and not np.isnan(revenue_prev)) else np.nan
 
-    op_cash_flow=float(last(ocf)); capex_val=float(last(capex))
-    fcf = op_cash_flow - (capex_val if not np.isnan(capex_val) else 0.0)
+    current_ratio = (current_assets/current_liabilities) if current_liabilities else np.nan
+    quick_ratio   = ((current_assets - (inventory if not np.isnan(inventory) else 0.0)) / current_liabilities) if current_liabilities else np.nan
+    d_to_e   = (total_debt/equity) if equity else np.nan
+    roe      = (net_income/equity) if equity else np.nan
+    roa      = (net_income/total_assets) if total_assets else np.nan
+    icov     = (operating_inc/interest_exp) if interest_exp and not np.isnan(operating_inc) else np.nan
 
-    gross_margin=(gross_profit/revenue) if revenue else np.nan
-    operating_margin=(operating_inc/revenue) if revenue else np.nan
-    net_margin=(net_income/revenue) if revenue else np.nan
-    fcf_margin=(fcf/revenue) if revenue else np.nan
-    revenue_yoy=(revenue/revenue_prev-1.0) if (revenue_prev and not np.isnan(revenue_prev)) else np.nan
-
-    current_ratio=(current_assets/current_liabilities) if current_liabilities else np.nan
-    quick_ratio=((current_assets-(inventory if not np.isnan(inventory) else 0.0))/current_liabilities) if current_liabilities else np.nan
-
-    d_to_e=(total_debt/equity) if equity else np.nan
-    roe=(net_income/equity) if equity else np.nan
-    roa=(net_income/total_assets) if total_assets else np.nan
-    icov=(operating_inc/interest_exp) if interest_exp and not np.isnan(operating_inc) else np.nan
-
-    def _ratio_yoy(num, den):
+    def _ratio_yoy(series_num, series_den):
         try:
-            n0,n1=float(last(num)),float(prev(num)); d0,d1=float(last(den)),float(prev(den))
-            if d0 and d1: m0,m1=(n0/d0),(n1/d1); return m0,(m0-m1)
-        except Exception: pass
+            n0, n1 = float(last(series_num)), float(prev(series_num))
+            d0, d1 = float(last(series_den)), float(prev(series_den))
+            if d0 and d1:
+                m0, m1 = (n0/d0), (n1/d1)
+                return m0, (m0 - m1)
+        except Exception:
+            pass
         return np.nan, np.nan
 
-    gm,gm_chg=_ratio_yoy(gross,rev); om,om_chg=_ratio_yoy(opinc,rev); nm,nm_chg=_ratio_yoy(net,rev)
+    gm, gm_chg = _ratio_yoy(gross, rev)
+    om, om_chg = _ratio_yoy(opinc, rev)
+    nm, nm_chg = _ratio_yoy(net, rev)
 
-    revenue_cagr=np.nan
-    if rev is not None and rev.dropna().size>=4:
+    revenue_cagr = np.nan
+    if rev is not None and rev.dropna().size >= 4:
         try:
-            v0=float(rev.dropna().iloc[-4]); v1=float(rev.dropna().iloc[-1])
-            if v0>0 and v1>0: revenue_cagr=(v1/v0)**(1/3)-1
-        except Exception: pass
+            v0 = float(rev.dropna().iloc[-4]); v1 = float(rev.dropna().iloc[-1])
+            if v0>0 and v1>0: revenue_cagr = (v1/v0)**(1/3) - 1
+        except Exception:
+            pass
 
     return {
-        "revenue":revenue,"revenue_prev":revenue_prev,"revenue_yoy":revenue_yoy,"revenue_cagr3y":revenue_cagr,
-        "gross_margin":gross_margin,"operating_margin":operating_margin,"net_margin":net_margin,
-        "gross_margin_chg":gm_chg,"operating_margin_chg":om_chg,"net_margin_chg":nm_chg,
-        "fcf":fcf,"fcf_margin":fcf_margin,"ocf":op_cash_flow,"capex":capex_val,
-        "current_ratio":current_ratio,"quick_ratio":quick_ratio,
-        "debt_total":total_debt,"debt_to_equity":d_to_e,
-        "roe":roe,"roa":roa,"interest_coverage":icov,
-        "assets":total_assets,"equity":equity
+        "revenue": revenue, "revenue_prev": revenue_prev, "revenue_yoy": revenue_yoy, "revenue_cagr3y": revenue_cagr,
+        "gross_margin": gross_margin, "operating_margin": operating_margin, "net_margin": net_margin,
+        "gross_margin_chg": gm_chg, "operating_margin_chg": om_chg, "net_margin_chg": nm_chg,
+        "fcf": fcf, "fcf_margin": fcf_margin, "ocf": op_cash_flow, "capex": capex_val,
+        "current_ratio": current_ratio, "quick_ratio": quick_ratio,
+        "debt_total": total_debt, "debt_to_equity": d_to_e,
+        "roe": roe, "roa": roa, "interest_coverage": icov,
+        "assets": total_assets, "equity": equity
     }
 
-def interpret_statement_metrics(m: Dict[str,float]) -> List[str]:
-    out=[]
-    y=m.get("revenue_yoy"); c=m.get("revenue_cagr3y")
-    if not np.isnan(y):
-        if y>0.1: out.append(f"**Top-line growth:** Revenue grew ~{y*100:.1f}% YoY (strong momentum).")
-        elif y>0.0: out.append(f"**Top-line growth:** Revenue grew ~{y*100:.1f}% YoY (modest).")
-        else: out.append(f"**Top-line growth:** Revenue declined ~{abs(y)*100:.1f}% YoY (headwind).")
-    if not np.isnan(c):
-        if c>0.1: out.append(f"**Multi-year growth:** ~{c*100:.1f}% CAGR over ~3 years.")
-        elif c>0.0: out.append(f"**Multi-year growth:** ~{c*100:.1f}% CAGR (slow but positive).")
-        else: out.append("**Multi-year growth:** roughly flat/negative over ~3 years.")
+def interpret_statement_metrics(m: Dict[str, float]) -> List[str]:
+    out = []
+    y = m.get("revenue_yoy"); c = m.get("revenue_cagr3y")
+    if not np.isnan(y): out.append(f"**Top-line growth:** {'+' if y>=0 else ''}{y*100:.1f}% YoY.")
+    if not np.isnan(c): out.append(f"**3-yr CAGR:** {'+' if c>=0 else ''}{c*100:.1f}%.")
 
-    gm,om,nm=m.get("gross_margin"),m.get("operating_margin"),m.get("net_margin")
-    if not np.isnan(gm):
-        qual="high" if gm>=0.5 else "mid" if gm>=0.3 else "low"
-        out.append(f"**Gross margin:** {gm*100:.1f}% ({qual}).")
-    if not np.isnan(om):
-        lvl="excellent" if om>=0.2 else "healthy" if om>=0.1 else "thin" if om>=0.0 else "negative"
-        out.append(f"**Operating margin:** {om*100:.1f}% ({lvl}).")
-    if not np.isnan(nm): out.append(f"**Net margin:** {nm*100:.1f}%.")
+    for label, key, cuts in [
+        ("Gross margin", "gross_margin", (0.5,0.3)),
+        ("Operating margin", "operating_margin", (0.2,0.1)),
+        ("Net margin", "net_margin", (0.2,0.1)),
+    ]:
+        v = m.get(key)
+        if np.isnan(v): continue
+        lvl = "excellent" if v>=cuts[0] else "healthy" if v>=cuts[1] else "thin" if v>=0 else "negative"
+        out.append(f"**{label}:** {v*100:.1f}% ({lvl}).")
 
-    for k,label in [("gross_margin_chg","gross"),("operating_margin_chg","operating"),("net_margin_chg","net")]:
-        d=m.get(k)
-        if not np.isnan(d) and abs(d)>=0.02:
-            out.append(f"**{label.title()} margin trend:** {('expanding' if d>0 else 'contracting')} ~{abs(d)*100:.1f} pp YoY.")
+    for nm_key, label in [("gross_margin_chg","Gross"),("operating_margin_chg","Operating"),("net_margin_chg","Net")]:
+        delta = m.get(nm_key)
+        if not np.isnan(delta) and abs(delta)>=0.02:
+            out.append(f"**{label} margin trend:** {('expanding' if delta>0 else 'contracting')} ~{abs(delta)*100:.1f} pp YoY.")
 
-    f=m.get("fcf_margin")
-    if not np.isnan(f):
-        txt = "strong free-cash-flow generation" if f>=0.10 else "modest free-cash-flow generation" if f>=0.0 else "negative free cash flow (investment/pressure)"
-        out.append(f"**FCF margin:** {f*100:.1f}% — {txt}.")
+    fcfm = m.get("fcf_margin")
+    if not np.isnan(fcfm):
+        txt = "strong" if fcfm>=0.10 else "modest" if fcfm>=0 else "negative"
+        out.append(f"**FCF margin:** {fcfm*100:.1f}% ({txt}).")
 
-    cr,qr=m.get("current_ratio"),m.get("quick_ratio")
-    if not np.isnan(cr):
-        s="strong" if cr>=2.0 else "adequate" if cr>=1.0 else "tight"
-        out.append(f"**Liquidity:** current ratio {cr:.2f} ({s}).")
+    cr = m.get("current_ratio"); qr=m.get("quick_ratio")
+    if not np.isnan(cr): out.append(f"**Liquidity:** current ratio {cr:.2f}.")
     if not np.isnan(qr): out.append(f"**Quick ratio:** {qr:.2f}.")
-
-    de=m.get("debt_to_equity")
-    if not np.isnan(de):
-        s="conservative" if de<=0.5 else "moderate" if de<=1.5 else "high"
-        out.append(f"**Leverage:** Debt/Equity ≈ {de:.2f} ({s}).")
-
-    ic=m.get("interest_coverage")
-    if not np.isnan(ic):
-        s="comfortable" if ic>=6 else "manageable" if ic>=2 else "stressed"
-        out.append(f"**Interest coverage:** ~{ic:.1f}× ({s}).")
-
-    for k,nm in [("roe","ROE"),("roa","ROA")]:
-        v=m.get(k)
+    de = m.get("debt_to_equity")
+    if not np.isnan(de): out.append(f"**Leverage:** D/E ≈ {de:.2f}.")
+    ic = m.get("interest_coverage")
+    if not np.isnan(ic): out.append(f"**Interest coverage:** ~{ic:.1f}×.")
+    for k, nm in [("roe","ROE"),("roa","ROA")]:
+        v = m.get(k)
         if not np.isnan(v): out.append(f"**{nm}:** {v*100:.1f}%.")
     return out
