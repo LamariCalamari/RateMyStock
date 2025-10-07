@@ -3,11 +3,14 @@
 # UI (CSS/brand), helpers, peer universes, robust yfinance loaders,
 # technicals + macro, fundamentals interpretation, portfolio editor,
 # and compact, ordered financial statements + metrics & narrative.
+# NEW:
+#   • Stock predictor (drift on log price with vol bands)
+#   • 2D multivariate Gaussian centrality scores (e.g., return vs vol)
 # -----------------------------------------------------------------------------
 
 from __future__ import annotations
 
-import os, re, json, time, random
+import os, re, json, time, random, math
 from typing import Iterable, List, Dict, Tuple, Optional
 
 import numpy as np
@@ -29,6 +32,8 @@ def inject_css() -> None:
         .small-muted{color:#9aa0a6;font-size:.9rem}
         .banner{background:#0c2f22;color:#cdebdc;border-radius:10px;padding:.9rem 1.1rem;margin:.75rem 0 1.25rem}
         .topbar{display:flex;justify-content:flex-end;margin:.2rem 0 .6rem}
+
+        /* Brand header */
         .brand{display:flex;align-items:center;justify-content:center;gap:16px;margin:1.0rem 0 .5rem;}
         .brand h1{
           font-size:56px;margin:0;line-height:1;font-weight:900;letter-spacing:.3px;
@@ -488,7 +493,7 @@ def holdings_editor_form(currency_symbol: str, total_value: float) -> Tuple[pd.D
     return df_hold, current
 
 
-# =============== Financial statements: clean, compact, ordered =================
+# =============== Financial statements: essential, clean, ordered ===============
 
 # Public currency map export (avoid import errors in pages)
 _CURRENCY_SYMBOL = {
@@ -506,8 +511,7 @@ def _clean_statement(df: pd.DataFrame) -> pd.DataFrame:
     out=out[~out.index.duplicated(keep="first")]
     for c in out.columns: out[c]=pd.to_numeric(out[c], errors="coerce")
     try:
-        out.columns=pd.to_datetime(out.columns)
-        out=out.sort_index(axis=1)
+        out.columns=pd.to_datetime(out.columns); out=out.sort_index(axis=1)
     except Exception:
         pass
     return out
@@ -532,49 +536,50 @@ def fetch_company_statements(ticker: str) -> Dict[str, object]:
         "cashflow_q": safe("quarterly_cashflow"),
     }
 
-# Canonical lines (essentials only)
-INCOME_LINES: List[Tuple[str, List[str]]] = [
-    ("Revenue",                ["Total Revenue","Revenue","Operating Revenue","Sales"]),
-    ("Cost of Revenue",        ["Cost Of Revenue","Cost of Goods Sold"]),
-    ("Gross Profit",           ["Gross Profit"]),
+# Essential, accountant-ordered specs
+INCOME_SPEC: List[Tuple[str, List[str]]] = [
+    ("Revenue", ["Total Revenue","Revenue","Operating Revenue","Sales"]),
+    ("Cost of Revenue", ["Cost Of Revenue","Cost of Goods Sold"]),
+    ("Gross Profit", ["Gross Profit"]),  # if missing, we compute as Revenue - CoR
     ("Research & Development", ["Research Development","Research And Development"]),
-    ("SG&A",                   ["Selling General Administrative","Selling General And Administrative","SG&A","General And Administrative Expense"]),
-    ("Operating Income",       ["Operating Income","Operating Profit","Ebit"]),
-    ("Interest Expense",       ["Interest Expense","Interest Expense Non Operating"]),
-    ("Other Income/Expense",   ["Other Income Expense","Other Non Operating Income Expense","Other Non Operating Income/Expense"]),
-    ("Pretax Income",          ["Pretax Income","Income Before Tax","Earnings Before Tax"]),
-    ("Income Tax",             ["Income Tax Expense","Provision For Income Taxes"]),
-    ("Net Income",             ["Net Income","Net Income Common Stockholders","Net Income Applicable To Common Shares",
-                                "Net Income Including Noncontrolling Interests","Net Income From Continuing Operations"]),
+    ("SG&A", ["Selling General Administrative","Selling General And Administrative","SG&A","General And Administrative Expense"]),
+    ("Operating Income", ["Operating Income","Operating Profit","Ebit"]),
+    ("Interest Expense", ["Interest Expense","Interest Expense Non Operating"]),
+    ("Other Income/Expense", ["Other Income Expense","Other Non Operating Income Expense","Other Non Operating Income/Expense"]),
+    ("Pretax Income", ["Pretax Income","Income Before Tax","Earnings Before Tax"]),
+    ("Income Tax", ["Income Tax Expense","Provision For Income Taxes"]),
+    ("Net Income", ["Net Income","Net Income Common Stockholders","Net Income Applicable To Common Shares",
+                    "Net Income Including Noncontrolling Interests","Net Income From Continuing Operations"]),
 ]
 
-BALANCE_LINES: List[Tuple[str, List[str]]] = [
-    ("Cash & ST Investments",  ["Cash And Cash Equivalents","Cash","Cash Equivalents","Short Term Investments","Cash And Short Term Investments"]),
-    ("Accounts Receivable",    ["Net Receivables","Accounts Receivable"]),
-    ("Inventory",              ["Inventory"]),
-    ("Other Current Assets",   ["Other Current Assets"]),
-    ("Total Current Assets",   ["Total Current Assets"]),
-    ("PP&E",                   ["Property Plant Equipment","Net Property Plant And Equipment","Property, Plant & Equipment"]),
+BALANCE_SPEC: List[Tuple[str, List[str]]] = [
+    ("Cash & ST Investments", ["Cash And Cash Equivalents","Cash","Cash Equivalents","Short Term Investments","Cash And Short Term Investments"]),
+    ("Accounts Receivable", ["Net Receivables","Accounts Receivable"]),
+    ("Inventory", ["Inventory"]),
+    ("Other Current Assets", ["Other Current Assets"]),
+    ("Total Current Assets", ["Total Current Assets"]),
+    ("PP&E", ["Property Plant Equipment","Net Property Plant And Equipment","Property, Plant & Equipment"]),
     ("Goodwill & Intangibles", ["Good Will","Goodwill","Intangible Assets"]),
-    ("Other Non-current Assets",["Other Assets","Non Current Assets","Other Non-Current Assets"]),
-    ("Total Assets",           ["Total Assets"]),
-    ("Accounts Payable",       ["Accounts Payable"]),
-    ("Short-term Debt",        ["Short Long Term Debt","Short-Term Debt","Current Portion of Long Term Debt"]),
-    ("Other Current Liabilities",["Other Current Liab","Other Current Liabilities"]),
-    ("Total Current Liabilities",["Total Current Liabilities"]),
-    ("Long-term Debt",         ["Long Term Debt"]),
-    ("Other Non-current Liabilities",["Long Term Liabilities","Other Non-Current Liabilities"]),
-    ("Total Liabilities",      ["Total Liab","Total Liabilities"]),
-    ("Total Equity",           ["Total Stockholder Equity","Total Shareholder Equity","Total Equity","Common Stock Equity"]),
+    ("Other Non-current Assets", ["Other Assets","Non Current Assets","Other Non-Current Assets"]),
+    ("Total Assets", ["Total Assets"]),
+    ("Accounts Payable", ["Accounts Payable"]),
+    ("Short-term Debt", ["Short Long Term Debt","Short-Term Debt","Current Portion of Long Term Debt"]),
+    ("Other Current Liabilities", ["Other Current Liab","Other Current Liabilities"]),
+    ("Total Current Liabilities", ["Total Current Liabilities"]),
+    ("Long-term Debt", ["Long Term Debt"]),
+    ("Other Non-current Liabilities", ["Long Term Liabilities","Other Non-Current Liabilities"]),
+    ("Total Liabilities", ["Total Liab","Total Liabilities"]),
+    ("Total Equity", ["Total Stockholder Equity","Total Shareholder Equity","Total Equity","Common Stock Equity"]),
     ("Total Liabilities & Equity", ["Total Liabilities & Stockholders' Equity","Total Liabilities And Stockholders Equity"]),
 ]
 
-CASHFLOW_LINES: List[Tuple[str, List[str]]] = [
+CASHFLOW_SPEC: List[Tuple[str, List[str]]] = [
     ("Cash from Operations", ["Total Cash From Operating Activities","Operating Cash Flow"]),
     ("Capital Expenditures", ["Capital Expenditures","Investments In Property Plant And Equipment"]),
-    ("Cash from Investing",  ["Total Cashflows From Investing Activities","Investing Cash Flow"]),
-    ("Cash from Financing",  ["Total Cash From Financing Activities","Financing Cash Flow"]),
-    ("Net Change in Cash",   ["Change In Cash","Change In Cash And Cash Equivalents","Effect Of Exchange Rate On Cash"]),
+    ("Free Cash Flow", []),  # computed if possible
+    ("Cash from Investing", ["Total Cashflows From Investing Activities","Investing Cash Flow"]),
+    ("Cash from Financing", ["Total Cash From Financing Activities","Financing Cash Flow"]),
+    ("Net Change in Cash", ["Change In Cash","Change In Cash And Cash Equivalents"]),
 ]
 
 def _find_row(df: pd.DataFrame, synonyms: List[str]) -> Optional[pd.Series]:
@@ -593,49 +598,64 @@ def _find_row(df: pd.DataFrame, synonyms: List[str]) -> Optional[pd.Series]:
                 return pd.to_numeric(df.loc[orig], errors="coerce")
     return None
 
-def _sum_rows(df: pd.DataFrame, groups: List[List[str]]) -> Optional[pd.Series]:
-    acc=None
-    for syns in groups:
-        s=_find_row(df, syns)
-        if s is not None:
-            acc = s.copy() if acc is None else (acc.add(s, fill_value=np.nan))
-    return acc
-
-def _ordered_compact(df: pd.DataFrame,
-                     spec: List[Tuple[str, List[str]]],
-                     computed: Dict[str, Tuple[str, str]] = None,
-                     take: int = 4) -> pd.DataFrame:
+def _ordered_table(df: pd.DataFrame, spec: List[Tuple[str, List[str]]], take: int = 4) -> pd.DataFrame:
     if df is None or df.empty: return pd.DataFrame()
     rows = []
-
-    for canon, syns in spec:
-        if "&" in canon or " + " in canon:
-            s = _sum_rows(df, [[s] for s in syns])
-        else:
-            s = _find_row(df, syns)
+    for label, syns in spec:
+        if label == "Free Cash Flow":
+            # compute later if possible
+            rows.append((label, None))
+            continue
+        s = _find_row(df, syns)
         if s is not None:
-            rows.append((canon, s))
+            rows.append((label, s))
 
-    computed = computed or {}
-    lookup = {name: ser for name,ser in rows}
-    for out_name, (a_name, b_name) in computed.items():
-        a = lookup.get(a_name); b = lookup.get(b_name)
-        if a is not None and b is not None:
-            rows.append((out_name, a - b))
+    tbl = pd.DataFrame({name: ser for name,ser in rows if ser is not None}).T if rows else pd.DataFrame()
 
-    if not rows: return pd.DataFrame()
-    table = pd.DataFrame({name: ser for name,ser in rows}).T
+    # Derived lines:
+    # Gross Profit = Revenue - CoR (if missing)
+    if "Gross Profit" not in tbl.index:
+        if "Revenue" in tbl.index and "Cost of Revenue" in tbl.index:
+            try:
+                gp = tbl.loc["Revenue"].sub(tbl.loc["Cost of Revenue"], fill_value=np.nan)
+                tbl.loc["Gross Profit"] = gp
+            except Exception:
+                pass
 
+    # Free Cash Flow = CFO - CapEx (if missing and CFO/CapEx exist)
+    if any(lab == "Free Cash Flow" for lab,_ in spec):
+        if "Free Cash Flow" not in tbl.index:
+            try:
+                cfo = _find_row(df, ["Total Cash From Operating Activities","Operating Cash Flow"])
+                capex = _find_row(df, ["Capital Expenditures","Investments In Property Plant And Equipment"])
+                if cfo is not None and capex is not None:
+                    fcf = cfo.sub(capex, fill_value=np.nan)
+                    tbl.loc["Free Cash Flow"] = fcf
+            except Exception:
+                pass
+
+    # Balance: enforce total L&E if possible
+    if spec is BALANCE_SPEC and "Total Liabilities & Equity" not in tbl.index:
+        try:
+            if "Total Liabilities" in tbl.index and "Total Equity" in tbl.index:
+                tle = tbl.loc["Total Liabilities"].add(tbl.loc["Total Equity"], fill_value=np.nan)
+                tbl.loc["Total Liabilities & Equity"] = tle
+        except Exception:
+            pass
+
+    # column order & last N periods
     try:
-        cols=pd.to_datetime(table.columns); table.columns=[c.date() for c in cols]; table=table.sort_index(axis=1)
+        tbl.columns=pd.to_datetime(tbl.columns); tbl=tbl.sort_index(axis=1)
+        tbl.columns=[c.date() for c in tbl.columns]
     except Exception:
-        table.columns=[str(c) for c in table.columns]
+        tbl.columns=[str(c) for c in tbl.columns]
+    tbl = tbl.iloc[:, -take:]
 
-    order = [name for name,_ in spec] + [k for k in computed.keys()]
-    exist = [r for r in order if r in table.index]
-    table = table.loc[exist]
-    table = table.iloc[:, -take:]
-    return table
+    # row order exactly as spec (existing only)
+    wanted = [lab for lab,_ in spec]
+    tbl = tbl.loc[[r for r in wanted if r in tbl.index]]
+
+    return tbl
 
 def build_compact_statements(stmts: Dict[str, object],
                              freq: str = "annual",
@@ -643,23 +663,11 @@ def build_compact_statements(stmts: Dict[str, object],
     inc = stmts["income"]   if freq=="annual" else stmts["income_q"]
     bal = stmts["balance"]  if freq=="annual" else stmts["balance_q"]
     cfs = stmts["cashflow"] if freq=="annual" else stmts["cashflow_q"]
-
-    income_tbl  = _ordered_compact(inc, INCOME_LINES, take=take)
-
-    balance_tbl = _ordered_compact(bal, BALANCE_LINES, take=take)
-    if not balance_tbl.empty and "Total Liabilities & Equity" not in balance_tbl.index:
-        try:
-            tle = balance_tbl.loc["Total Liabilities"] + balance_tbl.loc["Total Equity"]
-            balance_tbl.loc["Total Liabilities & Equity"] = tle
-        except Exception:
-            pass
-
-    cash_tbl = _ordered_compact(
-        cfs, CASHFLOW_LINES,
-        computed={"Free Cash Flow": ("Cash from Operations","Capital Expenditures")},
-        take=take
-    )
-    return {"income": income_tbl, "balance": balance_tbl, "cashflow": cash_tbl}
+    return {
+        "income":   _ordered_table(inc, INCOME_SPEC, take=take),
+        "balance":  _ordered_table(bal, BALANCE_SPEC, take=take),
+        "cashflow": _ordered_table(cfs, CASHFLOW_SPEC, take=take),
+    }
 
 def tidy_statement_for_display(df: pd.DataFrame, take: int = 4) -> pd.DataFrame:
     if df is None or df.empty: return pd.DataFrame()
@@ -689,8 +697,6 @@ def statement_metrics(stmts: Dict[str, object]) -> Dict[str, float]:
     opinc = pick(inc, ["Operating Income","Operating Profit","Ebit"])
     net   = pick(inc, ["Net Income","Net Income Common Stockholders","Net Income Applicable To Common Shares",
                        "Net Income Including Noncontrolling Interests","Net Income From Continuing Operations"])
-    cogs  = pick(inc, ["Cost Of Revenue","Cost of Goods Sold"])
-    tax   = pick(inc, ["Income Tax Expense","Provision For Income Taxes"])
     intr  = pick(inc, ["Interest Expense","Interest Expense Non Operating"])
 
     ta    = pick(bs,  ["Total Assets"])
@@ -860,3 +866,146 @@ def interpret_statement_metrics(m: Dict[str, float]) -> List[str]:
         if not np.isnan(v): out.append(f"**{nm}:** {v*100:.1f}%.")
 
     return out
+
+
+# ========================== Simple stock price predictor =======================
+
+def _ols_slope_intercept(x: np.ndarray, y: np.ndarray) -> Tuple[float,float]:
+    """Return slope, intercept for y ~ a*x + b (least squares)."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    n = x.size
+    if n == 0: return 0.0, float('nan')
+    xbar = x.mean(); ybar = y.mean()
+    xx = ((x - xbar) ** 2).sum()
+    if xx == 0: return 0.0, ybar
+    a = ((x - xbar) * (y - ybar)).sum() / xx
+    b = ybar - a * xbar
+    return a, b
+
+def predict_price(series: pd.Series, horizon_days: int = 30, lookback_days: int = 252) -> Dict[str, object]:
+    """
+    Very simple, robust predictor:
+      - fit a straight line to log-price over last `lookback_days`
+      - extrapolate `horizon_days`
+      - build +/- 1σ bands using realized daily volatility
+    Returns dict: {'forecast': DataFrame, 'slope': ..., 'vol_ann': ..., 'last_price': ...}
+    """
+    s = series.dropna().astype(float)
+    if s.size < 30:
+        return {"forecast": pd.DataFrame(), "slope": np.nan, "vol_ann": np.nan, "last_price": s.iloc[-1] if s.size else np.nan}
+
+    s = s.iloc[-min(lookback_days, s.size):]
+    t = np.arange(s.size)
+    logp = np.log(s.values)
+    a, b = _ols_slope_intercept(t, logp)  # log-price = a*t + b
+
+    # realized vol
+    ret = np.diff(logp)
+    vol_d = np.nanstd(ret, ddof=1)
+    vol_ann = vol_d * np.sqrt(252)
+
+    # forecast path
+    future_t = np.arange(s.size, s.size + horizon_days)
+    base = a * future_t + b
+    mid = np.exp(base)
+
+    # 1σ bands on price scale via log bands
+    up = np.exp(base + vol_d)
+    dn = np.exp(base - vol_d)
+
+    idx = pd.date_range(s.index[-1] + pd.Timedelta(days=1), periods=horizon_days, freq="B")
+    df = pd.DataFrame({"mid": mid, "lo_1s": dn, "hi_1s": up}, index=idx)
+
+    return {"forecast": df, "slope": a, "vol_ann": vol_ann, "last_price": float(s.iloc[-1])}
+
+
+# =============== 2D multivariate Gaussian centrality / anomaly score ==========
+
+def _mah2(x: np.ndarray, mu: np.ndarray, inv_cov: np.ndarray) -> float:
+    d = x - mu
+    return float(d.T @ inv_cov @ d)
+
+def gaussian2d_fit(X: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Fit mean, cov, inv_cov from 2D samples (rows = samples, cols = 2).
+    Returns (mu, cov, inv_cov). Adds tiny ridge if singular.
+    """
+    X = np.asarray(X, dtype=float)
+    if X.ndim != 2 or X.shape[1] != 2 or X.shape[0] < 5:
+        raise ValueError("Need at least 5 samples of 2D points.")
+    mu = X.mean(axis=0)
+    cov = np.cov(X.T, ddof=1)
+    # ridge if singular
+    eps = 1e-8
+    try:
+        inv_cov = np.linalg.inv(cov)
+    except np.linalg.LinAlgError:
+        inv_cov = np.linalg.inv(cov + eps*np.eye(2))
+    return mu, cov, inv_cov
+
+def gaussian2d_centrality(x: Tuple[float,float], mu: np.ndarray, inv_cov: np.ndarray) -> Dict[str, float]:
+    """
+    Centrality score in (0,1], where 1 is most central (Mahalanobis=0).
+    For df=2, Chi-square CDF is 1 - exp(-MD2/2). We return exp(-MD2/2) as a
+    "central density" style score (higher = more typical).
+    """
+    x = np.asarray(x, dtype=float)
+    md2 = _mah2(x, mu, inv_cov)
+    score = math.exp(-0.5*md2)      # likelihood-like centrality
+    tail  = math.exp(-0.5*md2)      # same functional form for df=2
+    return {"md2": md2, "centrality": score, "tail_prob": tail}
+
+def stock_return_vol_features(px: pd.Series, window: int = 60) -> Tuple[float, float]:
+    r = np.log(px).diff().dropna()
+    if r.size < window: window = max(10, min(window, r.size))
+    ret_w = float(np.exp(r.tail(window).sum()) - 1.0)  # window total return (geom)
+    vol_w = float(r.tail(window).std(ddof=1) * np.sqrt(252))  # annualized
+    return ret_w, vol_w
+
+def peer_return_vol_matrix(price_panel: Dict[str, pd.Series], window: int = 60) -> np.ndarray:
+    pts=[]
+    for t, s in price_panel.items():
+        s=s.dropna()
+        if s.size<window+5: continue
+        pts.append(stock_return_vol_features(s, window))
+    return np.array(pts, dtype=float) if pts else np.empty((0,2), dtype=float)
+
+
+# ========================== Public: build compact tables =======================
+
+def build_compact_statements(stmts: Dict[str, object],
+                             freq: str = "annual",
+                             take: int = 4) -> Dict[str, pd.DataFrame]:
+    inc = stmts["income"]   if freq=="annual" else stmts["income_q"]
+    bal = stmts["balance"]  if freq=="annual" else stmts["balance_q"]
+    cfs = stmts["cashflow"] if freq=="annual" else stmts["cashflow_q"]
+    return {
+        "income":   _ordered_table(inc, INCOME_SPEC, take=take),
+        "balance":  _ordered_table(bal, BALANCE_SPEC, take=take),
+        "cashflow": _ordered_table(cfs, CASHFLOW_SPEC, take=take),
+    }
+
+
+# =========================== END OF PUBLIC INTERFACE ===========================
+
+# Re-export names your pages import:
+__all__ = [
+    # UI
+    "inject_css","brand_header","topbar_back","inline_logo_svg",
+    # helpers
+    "yf_symbol","ema","rsi","macd","zscore_series","percentile_rank",
+    # loaders & universes
+    "fetch_prices_chunked_with_fallback","fetch_vix_series","fetch_fundamentals_simple",
+    "build_universe","PEER_CATALOG","set_peer_catalog",
+    # scoring
+    "technical_scores","macro_from_vix","fundamentals_interpretation",
+    # portfolio editor
+    "CURRENCY_MAP","holdings_editor_form",
+    # statements & metrics
+    "CURRENCY_SYMBOL","fetch_company_statements","build_compact_statements",
+    "tidy_statement_for_display","statement_metrics","interpret_statement_metrics",
+    # predictor & gaussian 2D
+    "predict_price","gaussian2d_fit","gaussian2d_centrality",
+    "stock_return_vol_features","peer_return_vol_matrix",
+]
