@@ -2,7 +2,7 @@
 # -----------------------------------------------------------------------------
 # UI (CSS/brand), helpers, peer universes, robust yfinance loaders,
 # technicals + macro, fundamentals interpretation, portfolio editor,
-# and **compact, ordered financial statements** (income/balance/cash flow).
+# and compact, ordered financial statements + metrics & narrative.
 # -----------------------------------------------------------------------------
 
 from __future__ import annotations
@@ -172,7 +172,7 @@ def fetch_prices_chunked_with_fallback(
     singles_pause: float = 1.1,
     hard_limit: int = 700,
 ) -> Tuple[pd.DataFrame, List[str]]:
-    """3-pass yfinance loader."""
+    """3-pass yfinance loader to maximize peer coverage."""
     names = [yf_symbol(t) for t in tickers if t]
     names = list(dict.fromkeys(names))[:hard_limit]
     if not names: return pd.DataFrame(), []
@@ -490,7 +490,7 @@ def holdings_editor_form(currency_symbol: str, total_value: float) -> Tuple[pd.D
 
 # =============== Financial statements: clean, compact, ordered =================
 
-# Public currency map export (avoid previous import error)
+# Public currency map export (avoid import errors in pages)
 _CURRENCY_SYMBOL = {
     "USD": "$", "EUR": "€", "GBP": "£", "JPY": "¥", "CAD": "C$", "AUD": "A$", "CHF": "CHF",
     "SEK": "kr", "NOK": "kr", "DKK": "kr", "HKD": "HK$", "CNY": "¥", "INR": "₹", "SGD": "S$"
@@ -505,7 +505,6 @@ def _clean_statement(df: pd.DataFrame) -> pd.DataFrame:
     out=df.copy()
     out=out[~out.index.duplicated(keep="first")]
     for c in out.columns: out[c]=pd.to_numeric(out[c], errors="coerce")
-    # columns are period end dates → sort by date
     try:
         out.columns=pd.to_datetime(out.columns)
         out=out.sort_index(axis=1)
@@ -533,8 +532,7 @@ def fetch_company_statements(ticker: str) -> Dict[str, object]:
         "cashflow_q": safe("quarterly_cashflow"),
     }
 
-# --- Canonical lines with synonym lists (only the essentials) ---
-
+# Canonical lines (essentials only)
 INCOME_LINES: List[Tuple[str, List[str]]] = [
     ("Revenue",                ["Total Revenue","Revenue","Operating Revenue","Sales"]),
     ("Cost of Revenue",        ["Cost Of Revenue","Cost of Goods Sold"]),
@@ -574,7 +572,6 @@ BALANCE_LINES: List[Tuple[str, List[str]]] = [
 CASHFLOW_LINES: List[Tuple[str, List[str]]] = [
     ("Cash from Operations", ["Total Cash From Operating Activities","Operating Cash Flow"]),
     ("Capital Expenditures", ["Capital Expenditures","Investments In Property Plant And Equipment"]),
-    # Free Cash Flow is computed
     ("Cash from Investing",  ["Total Cashflows From Investing Activities","Investing Cash Flow"]),
     ("Cash from Financing",  ["Total Cash From Financing Activities","Financing Cash Flow"]),
     ("Net Change in Cash",   ["Change In Cash","Change In Cash And Cash Equivalents","Effect Of Exchange Rate On Cash"]),
@@ -608,93 +605,258 @@ def _ordered_compact(df: pd.DataFrame,
                      spec: List[Tuple[str, List[str]]],
                      computed: Dict[str, Tuple[str, str]] = None,
                      take: int = 4) -> pd.DataFrame:
-    """
-    Build a compact table in canonical order using `spec`.
-    `computed` supports simple line derivations: {out_name: (num_name, den_name_or_other)}.
-    """
     if df is None or df.empty: return pd.DataFrame()
     rows = []
 
-    # primary rows
     for canon, syns in spec:
-        # for rows like "Goodwill & Intangibles" we allow summing of multiple synonyms if found
         if "&" in canon or " + " in canon:
-            groups = [[s] for s in syns]  # sum any present synonym lines
-            s = _sum_rows(df, groups)
+            s = _sum_rows(df, [[s] for s in syns])
         else:
             s = _find_row(df, syns)
         if s is not None:
             rows.append((canon, s))
 
-    # computed rows (e.g., Free Cash Flow = CFO - CapEx)
     computed = computed or {}
     lookup = {name: ser for name,ser in rows}
     for out_name, (a_name, b_name) in computed.items():
-        a = lookup.get(a_name)
-        b = lookup.get(b_name)
+        a = lookup.get(a_name); b = lookup.get(b_name)
         if a is not None and b is not None:
             rows.append((out_name, a - b))
 
     if not rows: return pd.DataFrame()
-
     table = pd.DataFrame({name: ser for name,ser in rows}).T
 
-    # make period headers tidy
     try:
         cols=pd.to_datetime(table.columns); table.columns=[c.date() for c in cols]; table=table.sort_index(axis=1)
     except Exception:
         table.columns=[str(c) for c in table.columns]
 
-    # enforce canonical order defined in spec + computed order
     order = [name for name,_ in spec] + [k for k in computed.keys()]
     exist = [r for r in order if r in table.index]
     table = table.loc[exist]
-
-    # last N periods only
     table = table.iloc[:, -take:]
     return table
 
 def build_compact_statements(stmts: Dict[str, object],
                              freq: str = "annual",
                              take: int = 4) -> Dict[str, pd.DataFrame]:
-    """
-    Return compact, properly ordered statements:
-      dict(income=..., balance=..., cashflow=...)
-    freq: 'annual' or 'quarterly'
-    """
     inc = stmts["income"]   if freq=="annual" else stmts["income_q"]
     bal = stmts["balance"]  if freq=="annual" else stmts["balance_q"]
     cfs = stmts["cashflow"] if freq=="annual" else stmts["cashflow_q"]
 
     income_tbl  = _ordered_compact(inc, INCOME_LINES, take=take)
 
-    # For Balance: compute TL&E if missing
     balance_tbl = _ordered_compact(bal, BALANCE_LINES, take=take)
-    if "Total Liabilities & Equity" not in balance_tbl.index:
-        # compute TL&E = Total Liabilities + Total Equity (if both exist)
+    if not balance_tbl.empty and "Total Liabilities & Equity" not in balance_tbl.index:
         try:
             tle = balance_tbl.loc["Total Liabilities"] + balance_tbl.loc["Total Equity"]
             balance_tbl.loc["Total Liabilities & Equity"] = tle
-            balance_tbl = balance_tbl.loc[[*balance_tbl.index]]  # keep order
         except Exception:
             pass
 
-    # Cash Flow: compute Free Cash Flow = CFO - CapEx
     cash_tbl = _ordered_compact(
-        cfs,
-        CASHFLOW_LINES,
+        cfs, CASHFLOW_LINES,
         computed={"Free Cash Flow": ("Cash from Operations","Capital Expenditures")},
         take=take
     )
-
     return {"income": income_tbl, "balance": balance_tbl, "cashflow": cash_tbl}
 
 def tidy_statement_for_display(df: pd.DataFrame, take: int = 4) -> pd.DataFrame:
-    """Kept for backwards-compat: trims to last periods and cleans headers."""
     if df is None or df.empty: return pd.DataFrame()
     out=df.copy()
     try:
         out.columns=pd.to_datetime(out.columns); out=out.sort_index(axis=1); out=out.iloc[:, -take:]; out.columns=[c.date() for c in out.columns]
     except Exception:
         out=out.iloc[:, -take:]; out.columns=[str(c) for c in out.columns]
+    return out
+
+
+# ---------------------- Statement-derived metrics + text -----------------------
+
+def statement_metrics(stmts: Dict[str, object]) -> Dict[str, float]:
+    """
+    Compute key ratios/trends from (prefer) annual statements.
+    Returns a dict with revenue, margins, growth, liquidity, leverage, returns, coverage, FCF.
+    """
+    inc = stmts.get("income", pd.DataFrame())
+    bs  = stmts.get("balance", pd.DataFrame())
+    cf  = stmts.get("cashflow", pd.DataFrame())
+
+    def pick(df, names): return _find_row(df, names)
+
+    rev   = pick(inc, ["Total Revenue","Revenue","Sales","Operating Revenue"])
+    gross = pick(inc, ["Gross Profit"])
+    opinc = pick(inc, ["Operating Income","Operating Profit","Ebit"])
+    net   = pick(inc, ["Net Income","Net Income Common Stockholders","Net Income Applicable To Common Shares",
+                       "Net Income Including Noncontrolling Interests","Net Income From Continuing Operations"])
+    cogs  = pick(inc, ["Cost Of Revenue","Cost of Goods Sold"])
+    tax   = pick(inc, ["Income Tax Expense","Provision For Income Taxes"])
+    intr  = pick(inc, ["Interest Expense","Interest Expense Non Operating"])
+
+    ta    = pick(bs,  ["Total Assets"])
+    teq   = pick(bs,  ["Total Stockholder Equity","Total Shareholder Equity","Total Equity","Common Stock Equity"])
+    tliab = pick(bs,  ["Total Liab","Total Liabilities"])
+    ca    = pick(bs,  ["Total Current Assets"])
+    cl    = pick(bs,  ["Total Current Liabilities"])
+    inv   = pick(bs,  ["Inventory"])
+    ltd   = pick(bs,  ["Long Term Debt"])
+    std   = pick(bs,  ["Short Long Term Debt","Short-Term Debt","Current Portion of Long Term Debt"])
+    notes = pick(bs,  ["Notes Payable"])
+
+    ocf   = pick(cf,  ["Total Cash From Operating Activities","Operating Cash Flow"])
+    capex = pick(cf,  ["Capital Expenditures","Investments In Property Plant And Equipment"])
+
+    def last(series):
+        return (series.dropna().iloc[-1] if series is not None and series.dropna().size else np.nan)
+    def prev(series):
+        return (series.dropna().iloc[-2] if series is not None and series.dropna().size>1 else np.nan)
+
+    revenue      = float(last(rev));      revenue_prev = float(prev(rev))
+    gross_profit = float(last(gross))
+    operating_inc= float(last(opinc))
+    net_income   = float(last(net))
+    interest_exp = abs(float(last(intr))) if not np.isnan(last(intr)) else np.nan
+
+    total_assets = float(last(ta))
+    equity       = float(last(teq)) if teq is not None else np.nan
+    if np.isnan(equity) and (ta is not None and tliab is not None):
+        equity = float(last(ta)) - float(last(tliab))
+
+    current_assets      = float(last(ca))
+    current_liabilities = float(last(cl))
+    inventory           = float(last(inv))
+    lt_debt             = float(last(ltd))
+    st_debt             = float(last(std))
+    notes_pay           = float(last(notes))
+    total_debt          = np.nansum([lt_debt, st_debt, notes_pay])
+
+    op_cash_flow = float(last(ocf))
+    capex_val    = float(last(capex))
+    fcf          = op_cash_flow - (capex_val if not np.isnan(capex_val) else 0.0)
+
+    # margins & growth
+    gross_margin      = (gross_profit/revenue) if revenue else np.nan
+    operating_margin  = (operating_inc/revenue) if revenue else np.nan
+    net_margin        = (net_income/revenue) if revenue else np.nan
+    fcf_margin        = (fcf/revenue) if revenue else np.nan
+    revenue_yoy       = (revenue/revenue_prev - 1.0) if (revenue_prev and not np.isnan(revenue_prev)) else np.nan
+
+    # liquidity
+    current_ratio = (current_assets/current_liabilities) if current_liabilities else np.nan
+    quick_ratio   = ((current_assets - (inventory if not np.isnan(inventory) else 0.0)) / current_liabilities) if current_liabilities else np.nan
+
+    # leverage & returns
+    d_to_e   = (total_debt/equity) if equity else np.nan
+    roe      = (net_income/equity) if equity else np.nan
+    roa      = (net_income/total_assets) if total_assets else np.nan
+    icov     = (operating_inc/interest_exp) if interest_exp and not np.isnan(operating_inc) else np.nan
+
+    # margin trends (YoY)
+    def _ratio_yoy(series_num, series_den):
+        try:
+            n0, n1 = float(last(series_num)), float(prev(series_num))
+            d0, d1 = float(last(series_den)), float(prev(series_den))
+            if d0 and d1:
+                m0, m1 = (n0/d0), (n1/d1)
+                return m0, (m0 - m1)
+        except Exception:
+            pass
+        return np.nan, np.nan
+
+    gm, gm_chg = _ratio_yoy(gross, rev)
+    om, om_chg = _ratio_yoy(opinc, rev)
+    nm, nm_chg = _ratio_yoy(net, rev)
+
+    # 3Y revenue CAGR
+    revenue_cagr = np.nan
+    if rev is not None and rev.dropna().size >= 4:
+        try:
+            v0 = float(rev.dropna().iloc[-4]); v1 = float(rev.dropna().iloc[-1])
+            if v0>0 and v1>0:
+                revenue_cagr = (v1/v0)**(1/3) - 1
+        except Exception:
+            pass
+
+    return {
+        "revenue": revenue, "revenue_prev": revenue_prev, "revenue_yoy": revenue_yoy, "revenue_cagr3y": revenue_cagr,
+        "gross_margin": gross_margin, "operating_margin": operating_margin, "net_margin": net_margin,
+        "gross_margin_chg": gm_chg, "operating_margin_chg": om_chg, "net_margin_chg": nm_chg,
+        "fcf": fcf, "fcf_margin": fcf_margin, "ocf": op_cash_flow, "capex": capex_val,
+        "current_ratio": current_ratio, "quick_ratio": quick_ratio,
+        "debt_total": total_debt, "debt_to_equity": d_to_e,
+        "roe": roe, "roa": roa, "interest_coverage": icov,
+        "assets": total_assets, "equity": equity
+    }
+
+def interpret_statement_metrics(m: Dict[str, float]) -> List[str]:
+    """Plain-English narrative tying statements to fundamentals."""
+    out = []
+
+    # Growth
+    y = m.get("revenue_yoy"); c = m.get("revenue_cagr3y")
+    if not np.isnan(y):
+        if y > 0.1: out.append(f"**Top-line growth:** Revenue grew ~{y*100:.1f}% YoY (strong).")
+        elif y > 0.0: out.append(f"**Top-line growth:** Revenue grew ~{y*100:.1f}% YoY (modest).")
+        else: out.append(f"**Top-line growth:** Revenue declined ~{abs(y)*100:.1f}% YoY (headwind).")
+    if not np.isnan(c):
+        if c > 0.1: out.append(f"**3Y CAGR:** ~{c*100:.1f}% (strong multi-year).")
+        elif c > 0.0: out.append(f"**3Y CAGR:** ~{c*100:.1f}% (slow but positive).")
+        else: out.append("**3Y CAGR:** roughly flat/negative.")
+
+    # Margins & profitability
+    gm, om, nm = m.get("gross_margin"), m.get("operating_margin"), m.get("net_margin")
+    if not np.isnan(gm):
+        qual = "high" if gm >= 0.5 else "mid" if gm >= 0.3 else "low"
+        out.append(f"**Gross margin:** {gm*100:.1f}% ({qual}).")
+    if not np.isnan(om):
+        if om >= 0.2: lvl="excellent"
+        elif om >= 0.1: lvl="healthy"
+        elif om >= 0.0: lvl="thin"
+        else: lvl="negative"
+        out.append(f"**Operating margin:** {om*100:.1f}% ({lvl}).")
+    if not np.isnan(nm):
+        out.append(f"**Net margin:** {nm*100:.1f}%.")
+
+    for nm_key, label in [("gross_margin_chg","gross"),("operating_margin_chg","operating"),("net_margin_chg","net")]:
+        delta = m.get(nm_key)
+        if not np.isnan(delta) and abs(delta) >= 0.02:
+            out.append(f"**{label.title()} margin trend:** {('expanding' if delta>0 else 'contracting')} ~{abs(delta)*100:.1f} pp YoY.")
+
+    # Cash flow quality
+    fcfm = m.get("fcf_margin")
+    if not np.isnan(fcfm):
+        if fcfm >= 0.10: txt="strong free-cash-flow generation"
+        elif fcfm >= 0.0: txt="modest free-cash-flow generation"
+        else: txt="negative free cash flow (investment/pressure)"
+        out.append(f"**FCF margin:** {fcfm*100:.1f}% — {txt}.")
+
+    # Liquidity
+    cr, qr = m.get("current_ratio"), m.get("quick_ratio")
+    if not np.isnan(cr):
+        if cr >= 2.0: s="strong"
+        elif cr >= 1.0: s="adequate"
+        else: s="tight"
+        out.append(f"**Liquidity:** current ratio {cr:.2f} ({s}).")
+    if not np.isnan(qr): out.append(f"**Quick ratio:** {qr:.2f}.")
+
+    # Leverage
+    de = m.get("debt_to_equity")
+    if not np.isnan(de):
+        if de <= 0.5: s="conservative"
+        elif de <= 1.5: s="moderate"
+        else: s="high"
+        out.append(f"**Leverage:** Debt/Equity ≈ {de:.2f} ({s}).")
+
+    ic = m.get("interest_coverage")
+    if not np.isnan(ic):
+        if ic >= 6: s="comfortable"
+        elif ic >= 2: s="manageable"
+        else: s="stressed"
+        out.append(f"**Interest coverage:** ~{ic:.1f}× ({s}).")
+
+    # Returns
+    for k, nm in [("roe","ROE"),("roa","ROA")]:
+        v = m.get(k)
+        if not np.isnan(v): out.append(f"**{nm}:** {v*100:.1f}%.")
+
     return out
