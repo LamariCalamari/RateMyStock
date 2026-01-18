@@ -130,6 +130,12 @@ if port.empty:
 def _cap_z(s: pd.Series, cap: float = 3.0) -> pd.Series:
     return s.clip(-cap, cap)
 
+def _composite_row(row: pd.Series, weights: dict) -> float:
+    total = sum(w for k, w in weights.items() if pd.notna(row.get(k)))
+    if total == 0:
+        return np.nan
+    return float(sum(row.get(k) * w for k, w in weights.items() if pd.notna(row.get(k))) / total)
+
 tickers = port["Ticker"].tolist()
 shares = port.set_index("Ticker")["Shares"].fillna(0.0)
 
@@ -165,13 +171,22 @@ for col in ["dma_gap","macd_hist","rsi_strength","mom12m"]:
 TECH_score_all = tech_all[[c for c in ["dma_gap_z","macd_hist_z","rsi_strength_z","mom12m_z"] if c in tech_all.columns]].mean(axis=1)
 
 fund_raw_all = fetch_fundamentals_simple(list(panel_all.keys()))
+core_fund = [
+    "revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
+    "profitMargins","grossMargins","operatingMargins","ebitdaMargins","fcfYield",
+    "trailingPE","forwardPE","enterpriseToEbitda","debtToEquity"
+]
+core_present = [c for c in core_fund if c in fund_raw_all.columns]
+if core_present:
+    min_fund_cols = 4
+    fund_raw_all = fund_raw_all[fund_raw_all[core_present].notna().sum(axis=1) >= min_fund_cols]
 fdf_all = pd.DataFrame(index=fund_raw_all.index)
 for col in ["revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
             "profitMargins","grossMargins","operatingMargins","ebitdaMargins","fcfYield"]:
     if col in fund_raw_all.columns: fdf_all[f"{col}_z"]=_cap_z(zscore_series(fund_raw_all[col]))
 for col in ["trailingPE","forwardPE","enterpriseToEbitda","debtToEquity"]:
     if col in fund_raw_all.columns: fdf_all[f"{col}_z"]=_cap_z(zscore_series(-fund_raw_all[col]))
-FUND_score_all = fdf_all.mean(axis=1) if len(fdf_all.columns) else pd.Series(0.0, index=fund_raw_all.index)
+FUND_score_all = fdf_all.mean(axis=1) if len(fdf_all.columns) else pd.Series(dtype=float)
 
 vix_series = fetch_vix_series(period="6mo", interval="1d")
 gold_series = fetch_gold_series(period="6mo", interval="1d")
@@ -182,11 +197,12 @@ MACRO = macro_from_signals(vix_series, gold_series, dxy_series, tnx_series, cred
 
 idx_all = pd.Index(list(panel_all.keys()))
 tmp = pd.DataFrame(index=idx_all)
-tmp["FUND"] = FUND_score_all.reindex(idx_all).fillna(0.0)
-tmp["TECH"] = TECH_score_all.reindex(idx_all).fillna(0.0)
+tmp["FUND"] = FUND_score_all.reindex(idx_all)
+tmp["TECH"] = TECH_score_all.reindex(idx_all)
 tmp["MACRO"] = MACRO
 wf,wt,wm = 0.50,0.45,0.05; wsum=(wf+wt+wm) or 1.0; wf,wt,wm = wf/wsum,wt/wsum,wm/wsum
-tmp["COMP"] = wf*tmp["FUND"] + wt*tmp["TECH"] + wm*tmp["MACRO"]
+weights = {"FUND": wf, "TECH": wt, "MACRO": wm}
+tmp["COMP"] = tmp.apply(_composite_row, axis=1, weights=weights)
 tmp = tmp.join(weights, how="left").fillna({"weight":0.0})
 live_signal = float((tmp["COMP"]*tmp["weight"]).sum())
 live_score = float(np.clip((live_signal+1)/2, 0, 1)*100)

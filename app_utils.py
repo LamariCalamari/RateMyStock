@@ -340,7 +340,8 @@ def build_universe(user_tickers: List[str], mode: str,
             if user_set & set(PEER_CATALOG.get(lbl,[])): chosen=lbl; break
         peers_all=[t for t in PEER_CATALOG.get(chosen,[]) if t not in user_set]; label=chosen
 
-    if mode == "Industry (auto fallback)" and user:
+    auto_modes = ("Industry (auto fallback)", "Auto (industry → sector → index)", "Auto by index membership")
+    if mode in auto_modes and user:
         target = user[0]
         target_profile = fetch_profile(target)
         target_industry = target_profile.get("industry")

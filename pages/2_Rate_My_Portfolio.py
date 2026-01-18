@@ -67,6 +67,12 @@ def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFra
 def _cap_z(s: pd.Series, cap: float = 3.0) -> pd.Series:
     return s.clip(-cap, cap)
 
+def _composite_row(row: pd.Series, weights: dict) -> float:
+    total = sum(w for k, w in weights.items() if pd.notna(row.get(k)))
+    if total == 0:
+        return np.nan
+    return float(sum(row.get(k) * w for k, w in weights.items() if pd.notna(row.get(k))) / total)
+
 # Default grid
 if st.session_state.get("grid_df") is None:
     st.session_state["grid_df"] = pd.DataFrame({
@@ -83,43 +89,51 @@ with t3: st.caption("Holdings update only when you click **Apply changes**.")
 st.markdown(
     f"**Holdings**  \n"
     f"<span class='small-muted'>Enter <b>Ticker</b> and either <b>Percent (%)</b> or "
-    f"<b>Amount ({cur})</b>. Values update only when you click "
-    f"<b>Apply changes</b>. Use <b>Normalize</b> to force exactly 100% in percent mode.</span>",
+    f"<b>Amount ({cur})</b>. Use <b>Normalize</b> to force exactly 100% in percent mode.</span>",
     unsafe_allow_html=True,
 )
 
+sync_mode = st.segmented_control(
+    "Sync mode",
+    options=["Percent → Amount", "Amount → Percent"],
+    default="Percent → Amount",
+    help="Choose which side drives."
+)
+mode_key = {"Percent → Amount": "percent", "Amount → Percent": "amount"}[sync_mode]
+
+auto_sync = st.checkbox("Auto-sync amounts", value=True)
+
 committed = st.session_state["grid_df"].copy()
-with st.form("holdings_form", clear_on_submit=False):
-    sync_mode = st.segmented_control(
-        "Sync mode",
-        options=["Percent → Amount", "Amount → Percent"],
-        default="Percent → Amount",
-        help="Choose which side drives on Apply."
-    )
-    mode_key = {"Percent → Amount": "percent", "Amount → Percent": "amount"}[sync_mode]
+percent_disabled = mode_key == "amount"
+amount_disabled = mode_key == "percent"
+edited = st.data_editor(
+    committed,
+    num_rows="dynamic",
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "Ticker": st.column_config.TextColumn(width="small"),
+        "Percent (%)": st.column_config.NumberColumn(format="%.2f", disabled=percent_disabled),
+        "Amount": st.column_config.NumberColumn(
+            format="%.2f", help=f"Amount in {cur}", disabled=amount_disabled
+        ),
+    },
+    key="grid_form",
+)
 
-    edited = st.data_editor(
-        committed,
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Ticker": st.column_config.TextColumn(width="small"),
-            "Percent (%)": st.column_config.NumberColumn(format="%.2f"),
-            "Amount": st.column_config.NumberColumn(format="%.2f", help=f"Amount in {cur}"),
-        },
-        key="grid_form",
-    )
-
-    col_a, col_b = st.columns([1, 1])
-    apply_btn = col_a.form_submit_button("Apply changes", type="primary", use_container_width=True)
-    normalize_btn = col_b.form_submit_button("Normalize to 100% (percent mode)", use_container_width=True)
+col_a, col_b = st.columns([1, 1])
+apply_btn = col_a.button("Apply changes", type="primary", use_container_width=True, disabled=auto_sync)
+normalize_btn = col_b.button("Normalize to 100% (percent mode)", use_container_width=True)
 
 if normalize_btn:
     syncd = edited.copy()
     syncd["Percent (%)"] = normalize_percents_to_100(_safe_num(syncd.get("Percent (%)")))
     if total and total>0:
         syncd["Amount"] = (syncd["Percent (%)"]/100.0*total).round(2)
+    st.session_state["grid_df"] = syncd[["Ticker","Percent (%)","Amount"]]
+
+elif auto_sync:
+    syncd = sync_percent_amount(edited.copy(), total, mode_key)
     st.session_state["grid_df"] = syncd[["Ticker","Percent (%)","Amount"]]
 
 elif apply_btn:
@@ -158,13 +172,22 @@ with st.status("Crunching the numbers…", expanded=True) as status:
     prog.progress(65)
 
     fund_raw_all = fetch_fundamentals_simple(list(panel_all.keys()))
+    core_fund = [
+        "revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
+        "profitMargins","grossMargins","operatingMargins","ebitdaMargins","fcfYield",
+        "trailingPE","forwardPE","enterpriseToEbitda","debtToEquity"
+    ]
+    core_present = [c for c in core_fund if c in fund_raw_all.columns]
+    if core_present:
+        min_fund_cols = 4
+        fund_raw_all = fund_raw_all[fund_raw_all[core_present].notna().sum(axis=1) >= min_fund_cols]
     fdf_all = pd.DataFrame(index=fund_raw_all.index)
     for col in ["revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
                 "profitMargins","grossMargins","operatingMargins","ebitdaMargins","fcfYield"]:
         if col in fund_raw_all.columns: fdf_all[f"{col}_z"]=_cap_z(zscore_series(fund_raw_all[col]))
     for col in ["trailingPE","forwardPE","enterpriseToEbitda","debtToEquity"]:
         if col in fund_raw_all.columns: fdf_all[f"{col}_z"]=_cap_z(zscore_series(-fund_raw_all[col]))
-    FUND_score_all = fdf_all.mean(axis=1) if len(fdf_all.columns) else pd.Series(0.0, index=fund_raw_all.index)
+    FUND_score_all = fdf_all.mean(axis=1) if len(fdf_all.columns) else pd.Series(dtype=float)
     prog.progress(85)
 
     vix_series = fetch_vix_series(period="6mo", interval="1d")
@@ -183,13 +206,15 @@ st.markdown(
 
 idx_all = pd.Index(list(panel_all.keys()))
 out_all = pd.DataFrame(index=idx_all)
-out_all["FUND_score"]  = FUND_score_all.reindex(idx_all).fillna(0.0)
-out_all["TECH_score"]  = TECH_score_all.reindex(idx_all).fillna(0.0)
+out_all["FUND_score"]  = FUND_score_all.reindex(idx_all)
+out_all["TECH_score"]  = TECH_score_all.reindex(idx_all)
 out_all["MACRO_score"] = MACRO
 wsum=(0.50+0.45+0.05) or 1.0
 wf,wt,wm = 0.50/wsum, 0.45/wsum, 0.05/wsum
-out_all["COMPOSITE"] = wf*out_all["FUND_score"] + wt*out_all["TECH_score"] + wm*out_all["MACRO_score"]
-out_all["RATING_0_100"] = percentile_rank(out_all["COMPOSITE"])
+weights = {"FUND_score": wf, "TECH_score": wt, "MACRO_score": wm}
+out_all["COMPOSITE"] = out_all.apply(_composite_row, axis=1, weights=weights)
+ratings = percentile_rank(out_all["COMPOSITE"].dropna())
+out_all["RATING_0_100"] = ratings.reindex(out_all.index)
 
 weights = None
 if total and total>0 and _safe_num(out["Amount"]).sum()>0:
