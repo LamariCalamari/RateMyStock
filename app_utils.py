@@ -1,13 +1,3 @@
-# app_utils.py — shared utilities for Rate My (Stock • Portfolio • Tracker)
-# -----------------------------------------------------------------------------
-# UI (CSS/brand), helpers, peer universes, robust yfinance loaders,
-# technicals + macro, fundamentals interpretation, portfolio editor,
-# and compact, ordered financial statements + metrics & narrative.
-# NEW:
-#   • Stock predictor (drift on log price with vol bands)
-#   • 2D multivariate Gaussian centrality scores (e.g., return vs vol)
-# -----------------------------------------------------------------------------
-
 from __future__ import annotations
 
 import os, re, json, time, random, math
