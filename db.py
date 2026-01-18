@@ -1,6 +1,6 @@
 # db.py
 import sqlite3, pandas as pd, streamlit as st
-from passlib.hash import bcrypt, bcrypt_sha256
+from passlib.hash import bcrypt, bcrypt_sha256, pbkdf2_sha256
 
 DB_PATH = "app.db"
 
@@ -49,7 +49,7 @@ def signup(email, password):
     try:
         with _conn() as con:
             con.execute("INSERT INTO users(email, password_hash) VALUES (?,?)",
-                        (email, bcrypt_sha256.hash(password)))
+                        (email, pbkdf2_sha256.hash(password)))
         st.session_state.user = {"email": email, "id": get_user_id(email)}
         return True, "Account created."
     except sqlite3.IntegrityError:
@@ -68,9 +68,12 @@ def login(email, password):
     if hashed.startswith("$2") and len(pw_bytes) > 72:
         return False, "Password too long for legacy accounts. Use 72 bytes or fewer."
     try:
-        ok = bcrypt_sha256.verify(password, hashed)
+        ok = pbkdf2_sha256.verify(password, hashed)
     except Exception:
-        ok = bcrypt.verify(password, hashed)
+        try:
+            ok = bcrypt_sha256.verify(password, hashed)
+        except Exception:
+            ok = bcrypt.verify(password, hashed)
     if not ok: return False, "Invalid credentials."
     st.session_state.user = {"email": email, "id": uid}
     return True, "Signed in."
