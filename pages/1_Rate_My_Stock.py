@@ -9,7 +9,8 @@ import yfinance as yf
 from app_utils import (
     inject_css, brand_header, yf_symbol, ema, rsi, macd,
     zscore_series, percentile_rank, fetch_prices_chunked_with_fallback,
-    fetch_fundamentals_simple, technical_scores, fetch_vix_series, macro_from_vix,
+    fetch_fundamentals_simple, technical_scores, fetch_vix_series, fetch_gold_series,
+    fetch_dxy_series, fetch_tnx_series, fetch_credit_ratio_series, macro_from_signals,
     fundamentals_interpretation, build_universe,
     # NEW:
     fetch_company_statements, statement_metrics, interpret_statement_metrics,
@@ -26,28 +27,37 @@ with c_in_mid:
     ticker = st.text_input(" ", "AAPL", label_visibility="collapsed",
                            placeholder="Type a ticker (e.g., AAPL)")
 
+peer_label_ph = None
+
 with st.expander("Advanced settings", expanded=False):
     c1,c2,c3 = st.columns(3)
     with c1:
         universe_mode = st.selectbox(
             "Peer universe",
-            ["Auto by index membership","S&P 500","Dow 30","NASDAQ 100","Custom (paste list)"], index=0
+            ["Auto by index membership","Industry (auto fallback)","S&P 500","Dow 30","NASDAQ 100","Custom (paste list)"], index=0
         )
     with c2:
         peer_n = st.slider("Peer sample size", 30, 300, 180, 10)
     with c3:
         history = st.selectbox("History for signals", ["1y","2y"], index=0)
     c4,c5,c6 = st.columns(3)
-    with c4: w_f = st.slider("Weight: Fundamentals", 0.0, 1.0, 0.5, 0.05)
-    with c5: w_t = st.slider("Weight: Technicals",   0.0, 1.0, 0.40, 0.05)
-    with c6: w_m = st.slider("Weight: Macro (VIX)",  0.0, 1.0, 0.10, 0.05)
+    with c4: w_f = st.slider("Weight: Fundamentals", 0.0, 1.0, 0.50, 0.05)
+    with c5: w_t = st.slider("Weight: Technicals",   0.0, 1.0, 0.45, 0.05)
+    with c6: w_m = st.slider("Weight: Macro (Multi-signal)",  0.0, 1.0, 0.05, 0.05)
     custom_raw = st.text_area("Custom peers (comma-separated)", "") \
                   if universe_mode=="Custom (paste list)" else ""
+    st.caption(
+        "Industry mode picks same-industry peers; if too few, it falls back to sector, then index."
+    )
+    peer_label_ph = st.empty()
 
 user_tickers = [yf_symbol(x) for x in ticker.split(",") if x.strip()]
 if not user_tickers:
     st.info("Enter a ticker above to run the rating.")
     st.stop()
+
+def _cap_z(s: pd.Series, cap: float = 3.0) -> pd.Series:
+    return s.clip(-cap, cap)
 
 # -------------------- Pipeline --------------------
 with st.status("Crunching the numbers…", expanded=True) as status:
@@ -55,6 +65,8 @@ with st.status("Crunching the numbers…", expanded=True) as status:
 
     status.update(label="Building peer universe…")
     universe, label = build_universe(user_tickers, universe_mode, peer_n, custom_raw)
+    if peer_label_ph:
+        peer_label_ph.caption(f"Current peer set: {label}")
     target_count = peer_n if universe_mode!="Custom (paste list)" else len(universe)
     prog.progress(10)
 
@@ -73,26 +85,38 @@ with st.status("Crunching the numbers…", expanded=True) as status:
     tech = technical_scores(panel)
     for col in ["dma_gap","macd_hist","rsi_strength","mom12m"]:
         if col in tech.columns:
-            tech[f"{col}_z"] = zscore_series(tech[col])
+            tech[f"{col}_z"] = _cap_z(zscore_series(tech[col]))
     TECH_score = tech[[c for c in ["dma_gap_z","macd_hist_z","rsi_strength_z","mom12m_z"] if c in tech.columns]].mean(axis=1)
     prog.progress(65)
 
     status.update(label="Fetching fundamentals…")
     fund_raw = fetch_fundamentals_simple(list(panel.keys()))
     fdf = pd.DataFrame(index=fund_raw.index)
-    for col in ["revenueGrowth","earningsGrowth","returnOnEquity","profitMargins",
-                "grossMargins","operatingMargins","ebitdaMargins"]:
+    for col in ["revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
+                "profitMargins","grossMargins","operatingMargins","ebitdaMargins","fcfYield"]:
         if col in fund_raw.columns:
-            fdf[f"{col}_z"] = zscore_series(fund_raw[col])
-    for col in ["trailingPE","forwardPE","debtToEquity"]:
+            fdf[f"{col}_z"] = _cap_z(zscore_series(fund_raw[col]))
+    for col in ["trailingPE","forwardPE","enterpriseToEbitda","debtToEquity"]:
         if col in fund_raw.columns:
-            fdf[f"{col}_z"] = zscore_series(-fund_raw[col])
+            fdf[f"{col}_z"] = _cap_z(zscore_series(-fund_raw[col]))
     FUND_score = fdf.mean(axis=1) if len(fdf.columns) else pd.Series(0.0, index=fund_raw.index)
     prog.progress(85)
 
     status.update(label="Assessing macro regime…")
     vix_series = fetch_vix_series(period="6mo", interval="1d")
-    MACRO, vix_last, vix_ema20, vix_gap = macro_from_vix(vix_series)
+    gold_series = fetch_gold_series(period="6mo", interval="1d")
+    dxy_series = fetch_dxy_series(period="6mo", interval="1d")
+    tnx_series = fetch_tnx_series(period="6mo", interval="1d")
+    credit_series = fetch_credit_ratio_series(period="6mo", interval="1d")
+    macro_pack = macro_from_signals(vix_series, gold_series, dxy_series, tnx_series, credit_series)
+    MACRO = macro_pack["macro"]
+    vix_last = macro_pack["vix_last"]
+    vix_ema20 = macro_pack["vix_ema20"]
+    vix_gap = macro_pack["vix_gap"]
+    gold_ret = macro_pack["gold_ret"]
+    dxy_ret = macro_pack["dxy_ret"]
+    tnx_delta = macro_pack["tnx_delta"]
+    credit_ret = macro_pack["credit_ret"]
     prog.progress(100)
     status.update(label="Done!", state="complete")
 
@@ -131,7 +155,7 @@ table = out.reindex(show_idx).sort_values("RATING_0_100", ascending=False)
 
 st.markdown("## 🏁 Ratings")
 pretty = table.rename(columns={
-    "FUND_score":"Fundamentals","TECH_score":"Technicals","MACRO_score":"Macro (VIX)",
+    "FUND_score":"Fundamentals","TECH_score":"Technicals","MACRO_score":"Macro (Multi-signal)",
     "COMPOSITE":"Composite","RATING_0_100":"Score (0–100)","RECO":"Recommendation"
 })
 st.dataframe(pretty.round(4), use_container_width=True)
@@ -145,7 +169,7 @@ for t in show_idx:
         c1,c2,c3 = st.columns(3)
         c1.markdown(f'<div class="kpi-card"><div>Fundamentals</div><div class="kpi-num">{table.loc[t,"FUND_score"]:.3f}</div></div>', unsafe_allow_html=True)
         c2.markdown(f'<div class="kpi-card"><div>Technicals</div><div class="kpi-num">{table.loc[t,"TECH_score"]:.3f}</div></div>', unsafe_allow_html=True)
-        c3.markdown(f'<div class="kpi-card"><div>Macro (VIX)</div><div class="kpi-num">{table.loc[t,"MACRO_score"]:.3f}</div></div>', unsafe_allow_html=True)
+        c3.markdown(f'<div class="kpi-card"><div>Macro (Multi-signal)</div><div class="kpi-num">{table.loc[t,"MACRO_score"]:.3f}</div></div>', unsafe_allow_html=True)
 
         # Fundamentals table
         st.markdown("#### Fundamentals — peer-relative z-scores")
@@ -153,12 +177,15 @@ for t in show_idx:
             "Revenue growth (z)": fdf.loc[t, "revenueGrowth_z"] if "revenueGrowth_z" in fdf.columns else np.nan,
             "Earnings growth (z)": fdf.loc[t, "earningsGrowth_z"] if "earningsGrowth_z" in fdf.columns else np.nan,
             "ROE (z)": fdf.loc[t, "returnOnEquity_z"] if "returnOnEquity_z" in fdf.columns else np.nan,
+            "ROA (z)": fdf.loc[t, "returnOnAssets_z"] if "returnOnAssets_z" in fdf.columns else np.nan,
             "Profit margin (z)": fdf.loc[t, "profitMargins_z"] if "profitMargins_z" in fdf.columns else np.nan,
             "Gross margin (z)": fdf.loc[t, "grossMargins_z"] if "grossMargins_z" in fdf.columns else np.nan,
             "Operating margin (z)": fdf.loc[t, "operatingMargins_z"] if "operatingMargins_z" in fdf.columns else np.nan,
             "EBITDA margin (z)": fdf.loc[t, "ebitdaMargins_z"] if "ebitdaMargins_z" in fdf.columns else np.nan,
             "PE (z, lower better)": fdf.loc[t, "trailingPE_z"] if "trailingPE_z" in fdf.columns else np.nan,
             "Forward PE (z, lower better)": fdf.loc[t, "forwardPE_z"] if "forwardPE_z" in fdf.columns else np.nan,
+            "EV/EBITDA (z, lower better)": fdf.loc[t, "enterpriseToEbitda_z"] if "enterpriseToEbitda_z" in fdf.columns else np.nan,
+            "FCF yield (z)": fdf.loc[t, "fcfYield_z"] if "fcfYield_z" in fdf.columns else np.nan,
             "Debt/Equity (z, lower better)": fdf.loc[t, "debtToEquity_z"] if "debtToEquity_z" in fdf.columns else np.nan,
         }, index=[t]).T.rename(columns={t:"z-score"})
         st.dataframe(fshow.round(3), use_container_width=True)
@@ -198,7 +225,7 @@ for t in show_idx:
             st.markdown("- " + "\n- ".join(notes))
 
         # Macro
-        st.markdown("#### Macro (VIX) — level & trend")
+        st.markdown("#### Macro (VIX + Gold + USD + Rates + Credit) — level & trend")
         if not np.isnan(vix_last):
             m1,m2,m3 = st.columns(3)
             m1.metric("VIX (last)", f"{vix_last:.2f}")
@@ -211,9 +238,22 @@ for t in show_idx:
             if vix_gap > 0.03: trend_txt = "rising above its 20-day average (volatility building)"
             elif vix_gap < -0.03: trend_txt = "falling below its 20-day average (volatility easing)"
             else: trend_txt = "moving roughly in line with its 20-day average"
-            st.markdown(f"- **Level:** {level_txt}.  \n- **Trend:** {trend_txt}.")
+            st.markdown(f"- **VIX level:** {level_txt}.  \n- **VIX trend:** {trend_txt}.")
         else:
             st.info("VIX unavailable — Macro defaults to neutral.")
+
+        if not np.isnan(gold_ret):
+            g_txt = "risk-off bid" if gold_ret > 0.05 else "risk-on backdrop" if gold_ret < -0.05 else "neutral signal"
+            st.markdown(f"- **Gold (3mo):** {gold_ret*100:.1f}% → {g_txt}.")
+        if not np.isnan(dxy_ret):
+            d_txt = "risk-off (USD bid)" if dxy_ret > 0.03 else "risk-on (USD weaker)" if dxy_ret < -0.03 else "neutral"
+            st.markdown(f"- **USD (UUP, 3mo):** {dxy_ret*100:.1f}% → {d_txt}.")
+        if not np.isnan(tnx_delta):
+            r_txt = "rates rising" if tnx_delta > 0.25 else "rates falling" if tnx_delta < -0.25 else "rates steady"
+            st.markdown(f"- **10Y yield (3mo):** {tnx_delta:+.2f} pp → {r_txt}.")
+        if not np.isnan(credit_ret):
+            c_txt = "credit improving" if credit_ret > 0.02 else "credit stress" if credit_ret < -0.02 else "neutral"
+            st.markdown(f"- **Credit (HYG/LQD, 3mo):** {credit_ret*100:.1f}% → {c_txt}.")
 
         # -------------------- NEW: Financial Statements & Interpretation --------------------
         st.markdown("---")

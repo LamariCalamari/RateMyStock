@@ -6,7 +6,8 @@ from db import ensure_db, get_current_user_from_state, signup, login, list_portf
 from app_utils import (
     inject_css, brand_header, yf_symbol, fetch_prices_chunked_with_fallback,
     technical_scores, fetch_fundamentals_simple, zscore_series,
-    fetch_vix_series, macro_from_vix
+    fetch_vix_series, fetch_gold_series, fetch_dxy_series, fetch_tnx_series,
+    fetch_credit_ratio_series, macro_from_signals
 )
 
 st.set_page_config(page_title="Portfolio Tracker", layout="wide")
@@ -49,21 +50,56 @@ if user_id:
         if not df_loaded.empty:
             st.session_state["tracker_ed"] = df_loaded.rename(columns={"ticker":"Ticker","shares":"Shares"})
 
-ed_default = pd.DataFrame({"Ticker":["AAPL","MSFT","NVDA"], "Shares":[10,5,3]})
+ed_default = pd.DataFrame({"Ticker":["AAPL","MSFT","NVDA"], "Shares":[10,5,3], "Value":[np.nan,np.nan,np.nan]})
 editor_df = st.session_state.get("tracker_ed", ed_default).copy()
 
-ed = st.data_editor(
-    editor_df, num_rows="dynamic", hide_index=True, use_container_width=True,
-    column_config={
-        "Ticker": st.column_config.TextColumn(width="small"),
-        "Shares": st.column_config.NumberColumn(format="%.6f", help="Number of shares (can be fractional)"),
-    },
-    key="tracker_editor_live"
+input_mode = st.segmented_control(
+    "Holdings input",
+    options=["Shares", "Value ($)"],
+    default="Shares",
+    help="Use Value to enter position sizes; shares are auto-computed from latest prices."
 )
+st.caption("Edit holdings and click **Apply holdings** to refresh calculations.")
+
+with st.form("tracker_holdings_form"):
+    ed = st.data_editor(
+        editor_df, num_rows="dynamic", hide_index=True, use_container_width=True,
+        column_config={
+            "Ticker": st.column_config.TextColumn(width="small"),
+            "Shares": st.column_config.NumberColumn(format="%.6f", help="Number of shares (can be fractional)"),
+            "Value": st.column_config.NumberColumn(format="%.2f", help="Position value in USD"),
+        },
+        key="tracker_editor_live"
+    )
+    apply_holdings = st.form_submit_button("Apply holdings", type="primary", use_container_width=True)
+
+if apply_holdings:
+    clean = ed.copy()
+    clean["Ticker"] = clean["Ticker"].astype(str).str.strip().map(yf_symbol)
+    clean["Shares"] = pd.to_numeric(clean["Shares"], errors="coerce")
+    clean["Value"] = pd.to_numeric(clean["Value"], errors="coerce")
+    clean = clean[clean["Ticker"].astype(bool)].reset_index(drop=True)
+
+    if input_mode == "Value ($)" and not clean.empty:
+        prices, ok = fetch_prices_chunked_with_fallback(
+            clean["Ticker"].tolist(), period="5d", interval="1d", chunk=10, retries=2
+        )
+        latest = prices.ffill().iloc[-1] if not prices.empty else pd.Series(dtype=float)
+        for i, row in clean.iterrows():
+            value = row.get("Value")
+            if pd.notna(value) and value > 0:
+                px = latest.get(row["Ticker"])
+                if pd.notna(px) and px > 0:
+                    clean.at[i, "Shares"] = value / px
+        if not latest.empty:
+            clean["Value"] = clean["Ticker"].map(latest) * clean["Shares"]
+
+    st.session_state["tracker_ed"] = clean[["Ticker","Shares","Value"]]
 
 col_a, col_b = st.columns([1,1])
 if user_id and st.button("💾 Save / Update", type="primary", use_container_width=True):
-    clean = ed.copy()
+    committed = st.session_state.get("tracker_ed", ed_default).copy()
+    clean = committed.copy()
     clean["ticker"] = clean["Ticker"].astype(str).str.strip().map(yf_symbol)
     clean["shares"] = pd.to_numeric(clean["Shares"], errors="coerce").fillna(0.0)
     clean = clean[clean["ticker"].astype(bool)][["ticker","shares"]]
@@ -84,15 +120,18 @@ if user_id and st.button("🗑️ Delete", use_container_width=True, disabled=no
         st.error(str(ex))
 
 # Compute value + live score
-port = ed.copy()
+port = st.session_state.get("tracker_ed", ed_default).copy()
 port["Ticker"] = port["Ticker"].astype(str).str.strip().map(yf_symbol)
 port = port[port["Ticker"].astype(bool)]
 if port.empty:
     st.info("Add at least one holding to track.")
     st.stop()
 
+def _cap_z(s: pd.Series, cap: float = 3.0) -> pd.Series:
+    return s.clip(-cap, cap)
+
 tickers = port["Ticker"].tolist()
-shares = port.set_index("Ticker")["Shares"]
+shares = port.set_index("Ticker")["Shares"].fillna(0.0)
 
 with st.status("Fetching prices & computing…", expanded=False):
     prices, ok = fetch_prices_chunked_with_fallback(tickers, period="1y", interval="1d")
@@ -122,27 +161,31 @@ weights = (weights_by_value / (weights_by_value.sum() or 1)).rename("weight")
 panel_all = {t: prices[t].dropna() for t in tickers if t in prices}
 tech_all = technical_scores(panel_all)
 for col in ["dma_gap","macd_hist","rsi_strength","mom12m"]:
-    if col in tech_all.columns: tech_all[f"{col}_z"] = zscore_series(tech_all[col])
+    if col in tech_all.columns: tech_all[f"{col}_z"] = _cap_z(zscore_series(tech_all[col]))
 TECH_score_all = tech_all[[c for c in ["dma_gap_z","macd_hist_z","rsi_strength_z","mom12m_z"] if c in tech_all.columns]].mean(axis=1)
 
 fund_raw_all = fetch_fundamentals_simple(list(panel_all.keys()))
 fdf_all = pd.DataFrame(index=fund_raw_all.index)
-for col in ["revenueGrowth","earningsGrowth","returnOnEquity","profitMargins",
-            "grossMargins","operatingMargins","ebitdaMargins"]:
-    if col in fund_raw_all.columns: fdf_all[f"{col}_z"]=zscore_series(fund_raw_all[col])
-for col in ["trailingPE","forwardPE","debtToEquity"]:
-    if col in fund_raw_all.columns: fdf_all[f"{col}_z"]=zscore_series(-fund_raw_all[col])
+for col in ["revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
+            "profitMargins","grossMargins","operatingMargins","ebitdaMargins","fcfYield"]:
+    if col in fund_raw_all.columns: fdf_all[f"{col}_z"]=_cap_z(zscore_series(fund_raw_all[col]))
+for col in ["trailingPE","forwardPE","enterpriseToEbitda","debtToEquity"]:
+    if col in fund_raw_all.columns: fdf_all[f"{col}_z"]=_cap_z(zscore_series(-fund_raw_all[col]))
 FUND_score_all = fdf_all.mean(axis=1) if len(fdf_all.columns) else pd.Series(0.0, index=fund_raw_all.index)
 
 vix_series = fetch_vix_series(period="6mo", interval="1d")
-MACRO, _, _, _ = macro_from_vix(vix_series)
+gold_series = fetch_gold_series(period="6mo", interval="1d")
+dxy_series = fetch_dxy_series(period="6mo", interval="1d")
+tnx_series = fetch_tnx_series(period="6mo", interval="1d")
+credit_series = fetch_credit_ratio_series(period="6mo", interval="1d")
+MACRO = macro_from_signals(vix_series, gold_series, dxy_series, tnx_series, credit_series)["macro"]
 
 idx_all = pd.Index(list(panel_all.keys()))
 tmp = pd.DataFrame(index=idx_all)
 tmp["FUND"] = FUND_score_all.reindex(idx_all).fillna(0.0)
 tmp["TECH"] = TECH_score_all.reindex(idx_all).fillna(0.0)
 tmp["MACRO"] = MACRO
-wf,wt,wm = 0.45,0.40,0.10; wsum=(wf+wt+wm) or 1.0; wf,wt,wm = wf/wsum,wt/wsum,wm/wsum
+wf,wt,wm = 0.50,0.45,0.05; wsum=(wf+wt+wm) or 1.0; wf,wt,wm = wf/wsum,wt/wsum,wm/wsum
 tmp["COMP"] = wf*tmp["FUND"] + wt*tmp["TECH"] + wm*tmp["MACRO"]
 tmp = tmp.join(weights, how="left").fillna({"weight":0.0})
 live_signal = float((tmp["COMP"]*tmp["weight"]).sum())

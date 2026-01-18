@@ -136,7 +136,8 @@ def _load_or_snapshot_peer_lists() -> Dict[str, List[str]]:
                 "Dow 30": _normalize_list(_DOW)}
     if os.path.exists(_SNAPSHOT_FILE):
         try:
-            obj=json.load(open(_SNAPSHOT_FILE,"r",encoding="utf-8"))
+            with open(_SNAPSHOT_FILE, "r", encoding="utf-8") as handle:
+                obj = json.load(handle)
             return {k:_normalize_list(v) for k,v in obj.items()}
         except Exception:
             pass
@@ -156,7 +157,7 @@ def set_peer_catalog(sp500=None, ndx=None, dow=None) -> None:
 
 # ============================ Data fetchers (robust) ===========================
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=3600)
 def fetch_prices_chunked_with_fallback(
     tickers: Iterable[str],
     period: str = "1y",
@@ -239,7 +240,7 @@ def fetch_prices_chunked_with_fallback(
     ok = list(dict.fromkeys(ok))
     return prices, ok
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=900)
 def fetch_vix_series(period="6mo", interval="1d") -> pd.Series:
     try:
         df = yf.Ticker("^VIX").history(period=period, interval=interval)
@@ -248,11 +249,51 @@ def fetch_vix_series(period="6mo", interval="1d") -> pd.Series:
         pass
     return pd.Series(dtype=float)
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=900)
+def fetch_gold_series(period="6mo", interval="1d") -> pd.Series:
+    try:
+        df = yf.Ticker("GLD").history(period=period, interval=interval)
+        if not df.empty: return df["Close"].rename("GLD")
+    except Exception:
+        pass
+    return pd.Series(dtype=float)
+
+@st.cache_data(show_spinner=False, ttl=900)
+def fetch_dxy_series(period="6mo", interval="1d") -> pd.Series:
+    try:
+        df = yf.Ticker("UUP").history(period=period, interval=interval)
+        if not df.empty: return df["Close"].rename("UUP")
+    except Exception:
+        pass
+    return pd.Series(dtype=float)
+
+@st.cache_data(show_spinner=False, ttl=900)
+def fetch_tnx_series(period="6mo", interval="1d") -> pd.Series:
+    try:
+        df = yf.Ticker("^TNX").history(period=period, interval=interval)
+        if not df.empty: return df["Close"].rename("^TNX")
+    except Exception:
+        pass
+    return pd.Series(dtype=float)
+
+@st.cache_data(show_spinner=False, ttl=900)
+def fetch_credit_ratio_series(period="6mo", interval="1d") -> pd.Series:
+    try:
+        hyg = yf.Ticker("HYG").history(period=period, interval=interval)["Close"].rename("HYG")
+        lqd = yf.Ticker("LQD").history(period=period, interval=interval)["Close"].rename("LQD")
+        if not hyg.empty and not lqd.empty:
+            ratio = (hyg / lqd).rename("HYG/LQD")
+            return ratio.dropna()
+    except Exception:
+        pass
+    return pd.Series(dtype=float)
+
+@st.cache_data(show_spinner=False, ttl=3600)
 def fetch_fundamentals_simple(tickers: Iterable[str]) -> pd.DataFrame:
-    keep = ["revenueGrowth","earningsGrowth","returnOnEquity",
+    keep = ["revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
             "profitMargins","grossMargins","operatingMargins","ebitdaMargins",
-            "trailingPE","forwardPE","debtToEquity"]
+            "trailingPE","forwardPE","enterpriseToEbitda","debtToEquity",
+            "freeCashflow","marketCap"]
     rows=[]
     for raw in tickers:
         t=yf_symbol(raw)
@@ -265,13 +306,26 @@ def fetch_fundamentals_simple(tickers: Iterable[str]) -> pd.DataFrame:
             try: row[k]=float(info.get(k, np.nan))
             except Exception: row[k]=np.nan
         rows.append(row)
-    return pd.DataFrame(rows).set_index("ticker")
+    df = pd.DataFrame(rows).set_index("ticker")
+    if "freeCashflow" in df.columns and "marketCap" in df.columns:
+        df["fcfYield"] = df["freeCashflow"] / df["marketCap"]
+    return df
+
+@st.cache_data(show_spinner=False, ttl=21600)
+def fetch_profile(ticker: str) -> Dict[str, Optional[str]]:
+    t = yf_symbol(ticker)
+    try:
+        info = yf.Ticker(t).info or {}
+    except Exception:
+        info = {}
+    return {"sector": info.get("sector"), "industry": info.get("industry")}
 
 
 # ================================ Universe ====================================
 
 def build_universe(user_tickers: List[str], mode: str,
-                   sample_n: int = 150, custom_raw: str = "") -> Tuple[List[str], str]:
+                   sample_n: int = 150, custom_raw: str = "",
+                   min_industry: int = 50, min_sector: int = 80) -> Tuple[List[str], str]:
     user = [yf_symbol(t) for t in user_tickers if t]
     user_set=set(user)
 
@@ -285,6 +339,25 @@ def build_universe(user_tickers: List[str], mode: str,
         for lbl in ("S&P 500","Dow 30","NASDAQ 100"):
             if user_set & set(PEER_CATALOG.get(lbl,[])): chosen=lbl; break
         peers_all=[t for t in PEER_CATALOG.get(chosen,[]) if t not in user_set]; label=chosen
+
+    if mode == "Industry (auto fallback)" and user:
+        target = user[0]
+        target_profile = fetch_profile(target)
+        target_industry = target_profile.get("industry")
+        target_sector = target_profile.get("sector")
+        profiles = {t: fetch_profile(t) for t in peers_all}
+
+        industry_peers = [t for t in peers_all if target_industry and profiles[t].get("industry") == target_industry]
+        sector_peers = [t for t in peers_all if target_sector and profiles[t].get("sector") == target_sector]
+
+        if target_industry and len(industry_peers) >= min_industry:
+            peers_all = industry_peers
+            label = f"Industry: {target_industry}"
+        elif target_sector and len(sector_peers) >= min_sector:
+            peers_all = sector_peers
+            label = f"Sector: {target_sector}"
+        else:
+            label = f"{label} (fallback)"
 
     if sample_n and len(peers_all)>sample_n:
         step = max(1, len(peers_all)//sample_n)
@@ -334,6 +407,61 @@ def macro_from_vix(vix: pd.Series):
     macro=float(np.clip(0.70*level+0.30*trend,0,1))
     return macro, vix_last, ema20, rel
 
+def _scaled_score_from_return(ret: float, positive_is_risk_on: bool) -> float:
+    if np.isnan(ret):
+        return 0.5
+    score = float(np.clip((ret + 0.10) / 0.20, 0.0, 1.0))
+    return score if positive_is_risk_on else 1.0 - score
+
+def macro_from_signals(
+    vix: pd.Series,
+    gold: pd.Series,
+    dxy: pd.Series,
+    tnx: pd.Series,
+    credit_ratio: pd.Series,
+    window: int = 63,
+):
+    vix_score, vix_last, ema20, rel = macro_from_vix(vix)
+
+    def _ret(series: pd.Series) -> float:
+        if series is None or series.empty or series.size < window + 5:
+            return np.nan
+        return float(series.iloc[-1] / series.iloc[-window] - 1.0)
+
+    gold_ret = _ret(gold)
+    dxy_ret = _ret(dxy)
+    credit_ret = _ret(credit_ratio)
+
+    if tnx is None or tnx.empty or tnx.size < window + 5:
+        tnx_delta = np.nan
+    else:
+        tnx_delta = float((tnx.iloc[-1] - tnx.iloc[-window]) / 10.0)
+
+    gold_score = _scaled_score_from_return(gold_ret, positive_is_risk_on=False)
+    dxy_score = _scaled_score_from_return(dxy_ret, positive_is_risk_on=False)
+    credit_score = _scaled_score_from_return(credit_ret, positive_is_risk_on=True)
+
+    if np.isnan(tnx_delta):
+        tnx_score = 0.5
+    else:
+        tnx_score = float(np.clip((0.75 - tnx_delta) / 1.5, 0.0, 1.0))
+
+    macro = float(np.clip(
+        0.50 * vix_score + 0.15 * gold_score + 0.15 * dxy_score + 0.10 * tnx_score + 0.10 * credit_score,
+        0, 1
+    ))
+
+    return {
+        "macro": macro,
+        "vix_last": vix_last,
+        "vix_ema20": ema20,
+        "vix_gap": rel,
+        "gold_ret": gold_ret,
+        "dxy_ret": dxy_ret,
+        "tnx_delta": tnx_delta,
+        "credit_ret": credit_ret,
+    }
+
 
 # ========================= Fundamentals interpretation ========================
 
@@ -351,24 +479,32 @@ def fundamentals_interpretation(zrow: pd.Series) -> List[str]:
     pm=bucket(zrow.get("profitMargins_z"))
     gm=bucket(zrow.get("grossMargins_z"))
     om=bucket(zrow.get("operatingMargins_z"))
+    roa=bucket(zrow.get("returnOnAssets_z"))
     roe=bucket(zrow.get("returnOnEquity_z"))
     val=bucket(zrow.get("forwardPE_z"), pos_good=False)
+    ev=bucket(zrow.get("enterpriseToEbitda_z"), pos_good=False)
     lev=bucket(zrow.get("debtToEquity_z"), pos_good=False)
+    fcf=bucket(zrow.get("fcfYield_z"))
 
     if g=="bullish" or e=="bullish": lines.append("**Growth tilt:** above-peer growth (supportive).")
     elif g=="watch" or e=="watch":   lines.append("**Growth tilt:** below peers — watch for re-acceleration.")
     else:                            lines.append("**Growth tilt:** peer-like.")
 
-    if (pm=="bullish" or gm=="bullish" or om=="bullish" or roe=="bullish"):
+    if (pm=="bullish" or gm=="bullish" or om=="bullish" or roa=="bullish" or roe=="bullish"):
         lines.append("**Profitability:** strong vs peers.")
-    elif (pm=="watch" or gm=="watch" or om=="watch" or roe=="watch"):
+    elif (pm=="watch" or gm=="watch" or om=="watch" or roa=="watch" or roe=="watch"):
         lines.append("**Profitability:** below peer medians — monitor margins.")
     else:
         lines.append("**Profitability:** roughly peer-like.")
 
-    if val.startswith("bullish"): lines.append("**Valuation:** cheaper than peers.")
-    elif val.startswith("watch"): lines.append("**Valuation:** richer than peers — execution must stay strong.")
+    if val.startswith("bullish") or ev.startswith("bullish"):
+        lines.append("**Valuation:** cheaper than peers.")
+    elif val.startswith("watch") or ev.startswith("watch"):
+        lines.append("**Valuation:** richer than peers — execution must stay strong.")
     else:                         lines.append("**Valuation:** around peer medians.")
+
+    if fcf=="bullish": lines.append("**Cash generation:** attractive FCF yield.")
+    elif fcf=="watch": lines.append("**Cash generation:** weak FCF yield vs peers.")
 
     if lev.startswith("bullish"): lines.append("**Balance sheet:** lower leverage.")
     elif lev.startswith("watch"): lines.append("**Balance sheet:** higher leverage — keep an eye on cash flow.")
@@ -506,6 +642,7 @@ def _clean_statement(df: pd.DataFrame) -> pd.DataFrame:
         pass
     return out
 
+@st.cache_data(show_spinner=False, ttl=21600)
 def fetch_company_statements(ticker: str) -> Dict[str, object]:
     t=yf.Ticker(yf_symbol(ticker))
     try: info=t.info or {}
@@ -525,6 +662,15 @@ def fetch_company_statements(ticker: str) -> Dict[str, object]:
         "balance_q": safe("quarterly_balance_sheet"),
         "cashflow_q": safe("quarterly_cashflow"),
     }
+
+@st.cache_data(show_spinner=False, ttl=21600)
+def fetch_sector(ticker: str) -> Optional[str]:
+    t = yf_symbol(ticker)
+    try:
+        info = yf.Ticker(t).info or {}
+    except Exception:
+        info = {}
+    return info.get("sector")
 
 # Essential, accountant-ordered specs
 INCOME_SPEC: List[Tuple[str, List[str]]] = [
@@ -962,21 +1108,6 @@ def peer_return_vol_matrix(price_panel: Dict[str, pd.Series], window: int = 60) 
     return np.array(pts, dtype=float) if pts else np.empty((0,2), dtype=float)
 
 
-# ========================== Public: build compact tables =======================
-
-def build_compact_statements(stmts: Dict[str, object],
-                             freq: str = "annual",
-                             take: int = 4) -> Dict[str, pd.DataFrame]:
-    inc = stmts["income"]   if freq=="annual" else stmts["income_q"]
-    bal = stmts["balance"]  if freq=="annual" else stmts["balance_q"]
-    cfs = stmts["cashflow"] if freq=="annual" else stmts["cashflow_q"]
-    return {
-        "income":   _ordered_table(inc, INCOME_SPEC, take=take),
-        "balance":  _ordered_table(bal, BALANCE_SPEC, take=take),
-        "cashflow": _ordered_table(cfs, CASHFLOW_SPEC, take=take),
-    }
-
-
 # =========================== END OF PUBLIC INTERFACE ===========================
 
 # Re-export names your pages import:
@@ -986,10 +1117,11 @@ __all__ = [
     # helpers
     "yf_symbol","ema","rsi","macd","zscore_series","percentile_rank",
     # loaders & universes
-    "fetch_prices_chunked_with_fallback","fetch_vix_series","fetch_fundamentals_simple",
+    "fetch_prices_chunked_with_fallback","fetch_vix_series","fetch_gold_series","fetch_dxy_series",
+    "fetch_tnx_series","fetch_credit_ratio_series","fetch_fundamentals_simple","fetch_sector",
     "build_universe","PEER_CATALOG","set_peer_catalog",
     # scoring
-    "technical_scores","macro_from_vix","fundamentals_interpretation",
+    "technical_scores","macro_from_vix","macro_from_signals","fundamentals_interpretation",
     # portfolio editor
     "CURRENCY_MAP","holdings_editor_form",
     # statements & metrics

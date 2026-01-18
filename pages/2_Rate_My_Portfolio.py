@@ -1,13 +1,12 @@
 # pages/2_Rate_My_Portfolio.py
-import io
 import numpy as np
 import pandas as pd
 import streamlit as st
-import yfinance as yf
 from app_utils import (
     inject_css, brand_header, yf_symbol, fetch_prices_chunked_with_fallback,
-    fetch_vix_series, macro_from_vix, technical_scores, fetch_fundamentals_simple,
-    zscore_series, percentile_rank, build_universe
+    fetch_vix_series, fetch_gold_series, fetch_dxy_series, fetch_tnx_series, fetch_credit_ratio_series,
+    macro_from_signals, technical_scores, fetch_fundamentals_simple,
+    zscore_series, percentile_rank, build_universe, fetch_sector
 )
 
 st.set_page_config(page_title="Rate My Portfolio", layout="wide")
@@ -64,6 +63,9 @@ def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFra
         w=pd.Series([1.0/n]*n, index=df.index)
     df["weight"]=w
     return df
+
+def _cap_z(s: pd.Series, cap: float = 3.0) -> pd.Series:
+    return s.clip(-cap, cap)
 
 # Default grid
 if st.session_state.get("grid_df") is None:
@@ -151,22 +153,26 @@ with st.status("Crunching the numbers…", expanded=True) as status:
     panel_all = {t: prices[t].dropna() for t in prices.columns if t in prices.columns and prices[t].dropna().size>0}
     tech_all = technical_scores(panel_all)
     for col in ["dma_gap","macd_hist","rsi_strength","mom12m"]:
-        if col in tech_all.columns: tech_all[f"{col}_z"] = zscore_series(tech_all[col])
+        if col in tech_all.columns: tech_all[f"{col}_z"] = _cap_z(zscore_series(tech_all[col]))
     TECH_score_all = tech_all[[c for c in ["dma_gap_z","macd_hist_z","rsi_strength_z","mom12m_z"] if c in tech_all.columns]].mean(axis=1)
     prog.progress(65)
 
     fund_raw_all = fetch_fundamentals_simple(list(panel_all.keys()))
     fdf_all = pd.DataFrame(index=fund_raw_all.index)
-    for col in ["revenueGrowth","earningsGrowth","returnOnEquity","profitMargins",
-                "grossMargins","operatingMargins","ebitdaMargins"]:
-        if col in fund_raw_all.columns: fdf_all[f"{col}_z"]=zscore_series(fund_raw_all[col])
-    for col in ["trailingPE","forwardPE","debtToEquity"]:
-        if col in fund_raw_all.columns: fdf_all[f"{col}_z"]=zscore_series(-fund_raw_all[col])
+    for col in ["revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
+                "profitMargins","grossMargins","operatingMargins","ebitdaMargins","fcfYield"]:
+        if col in fund_raw_all.columns: fdf_all[f"{col}_z"]=_cap_z(zscore_series(fund_raw_all[col]))
+    for col in ["trailingPE","forwardPE","enterpriseToEbitda","debtToEquity"]:
+        if col in fund_raw_all.columns: fdf_all[f"{col}_z"]=_cap_z(zscore_series(-fund_raw_all[col]))
     FUND_score_all = fdf_all.mean(axis=1) if len(fdf_all.columns) else pd.Series(0.0, index=fund_raw_all.index)
     prog.progress(85)
 
     vix_series = fetch_vix_series(period="6mo", interval="1d")
-    MACRO, _, _, _ = macro_from_vix(vix_series)
+    gold_series = fetch_gold_series(period="6mo", interval="1d")
+    dxy_series = fetch_dxy_series(period="6mo", interval="1d")
+    tnx_series = fetch_tnx_series(period="6mo", interval="1d")
+    credit_series = fetch_credit_ratio_series(period="6mo", interval="1d")
+    MACRO = macro_from_signals(vix_series, gold_series, dxy_series, tnx_series, credit_series)["macro"]
     prog.progress(100)
     status.update(label="Done!", state="complete")
 
@@ -180,15 +186,10 @@ out_all = pd.DataFrame(index=idx_all)
 out_all["FUND_score"]  = FUND_score_all.reindex(idx_all).fillna(0.0)
 out_all["TECH_score"]  = TECH_score_all.reindex(idx_all).fillna(0.0)
 out_all["MACRO_score"] = MACRO
-wsum=(0.45+0.40+0.10) or 1.0
-wf,wt,wm = 0.45/wsum, 0.40/wsum, 0.10/wsum
+wsum=(0.50+0.45+0.05) or 1.0
+wf,wt,wm = 0.50/wsum, 0.45/wsum, 0.05/wsum
 out_all["COMPOSITE"] = wf*out_all["FUND_score"] + wt*out_all["TECH_score"] + wm*out_all["MACRO_score"]
 out_all["RATING_0_100"] = percentile_rank(out_all["COMPOSITE"])
-
-# Diversification metrics (same as original)
-def fetch_sector(t):
-    try: return yf.Ticker(t).info.get("sector", None)
-    except Exception: return None
 
 weights = None
 if total and total>0 and _safe_num(out["Amount"]).sum()>0:
@@ -200,6 +201,17 @@ else:
     weights = pd.Series([1.0/n]*n, index=out.index)
 
 tickers_shown = out["ticker"].tolist()
+available_holdings = [t for t in tickers_shown if t in prices.columns]
+missing_holdings = [t for t in tickers_shown if t not in prices.columns]
+if missing_holdings:
+    st.warning(
+        "Some holdings had no price data and were excluded from charts/correlation: "
+        + ", ".join(missing_holdings)
+    )
+if not available_holdings:
+    st.error("No price data available for current holdings.")
+    st.stop()
+
 weights_named = pd.Series(list(weights.values), index=tickers_shown)
 
 meta_sec = pd.Series({t: fetch_sector(t) for t in tickers_shown})
@@ -214,7 +226,7 @@ if   max_w <= 0.10: name_div = 1.0
 elif max_w >= 0.40: name_div = 0.0
 else:               name_div = float((0.40-max_w)/0.30)
 
-ret = prices[tickers_shown].pct_change().dropna(how="all")
+ret = prices[available_holdings].pct_change().dropna(how="all")
 if ret.shape[1]>=2:
     corr = ret.corr().values; n=corr.shape[0]
     avg_corr = (corr.sum()-np.trace(corr))/max(1,(n*n-n))
@@ -236,14 +248,14 @@ st.markdown("## 🧺 Portfolio — Scores")
 a,b,c,d = st.columns(4)
 a.metric("Portfolio Score (0–100)", f"{port_score:.1f}")
 b.metric("Signal (weighted composite)", f"{port_signal:.3f}")
-c.metric("Macro (VIX)", f"{MACRO:.3f}")
+c.metric("Macro (Multi-signal)", f"{MACRO:.3f}")
 d.metric("Diversification", f"{DIV:.3f}")
 
 with st.expander("Why this portfolio rating?"):
     show = per_name.rename(columns={"weight":"Weight","FUND_score":"Fundamentals",
-                                    "TECH_score":"Technicals","MACRO_score":"Macro (VIX)",
+                                    "TECH_score":"Technicals","MACRO_score":"Macro (Multi-signal)",
                                     "COMPOSITE":"Composite","weighted_composite":"Weight × Comp"})[
-        ["Weight","Fundamentals","Technicals","Macro (VIX)","Composite","Weight × Comp"]
+        ["Weight","Fundamentals","Technicals","Macro (Multi-signal)","Composite","Weight × Comp"]
     ]
     st.dataframe(show.round(4), use_container_width=True)
     st.markdown("**Diversification explained**")
@@ -256,7 +268,7 @@ with st.expander("Why this portfolio rating?"):
     )
 
 # Risk/return charts — identical to original
-px_held = prices[tickers_shown].dropna(how="all")
+px_held = prices[available_holdings].dropna(how="all")
 r = px_held.pct_change().fillna(0)
 w_vec = weights_named.reindex(px_held.columns).fillna(0).values
 port_r = (r * w_vec).sum(axis=1)
