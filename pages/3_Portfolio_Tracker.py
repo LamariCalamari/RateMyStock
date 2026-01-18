@@ -244,3 +244,14 @@ live_score = float(np.clip((live_signal+1)/2, 0, 1)*100)
 
 st.markdown("### 🔮 Live ‘Rate My Portfolio’ Score")
 st.metric("Portfolio Score (0–100)", f"{live_score:.1f}")
+def _score_label(score: float) -> str:
+    if score >= 80: return "Strong Buy"
+    if score >= 60: return "Buy"
+    if score >= 40: return "Hold"
+    if score >= 20: return "Sell"
+    return "Strong Sell"
+
+st.caption(
+    f"Interpretation: **{_score_label(live_score)}**. "
+    "80+ strong, 60–79 buy, 40–59 hold, 20–39 sell, <20 strong sell."
+)

@@ -1,6 +1,6 @@
 # db.py
 import sqlite3, pandas as pd, streamlit as st
-from passlib.hash import bcrypt
+from passlib.hash import bcrypt, bcrypt_sha256
 
 DB_PATH = "app.db"
 
@@ -43,10 +43,12 @@ def ensure_db():
 def signup(email, password):
     email = (email or "").strip().lower()
     if not email or not password: return False, "Email and password required."
+    if len(password.encode("utf-8")) > 1024:
+        return False, "Password too long. Please use 1024 bytes or fewer."
     try:
         with _conn() as con:
             con.execute("INSERT INTO users(email, password_hash) VALUES (?,?)",
-                        (email, bcrypt.hash(password)))
+                        (email, bcrypt_sha256.hash(password)))
         st.session_state.user = {"email": email, "id": get_user_id(email)}
         return True, "Account created."
     except sqlite3.IntegrityError:
@@ -54,11 +56,18 @@ def signup(email, password):
 
 def login(email, password):
     email = (email or "").strip().lower()
+    if not password: return False, "Password required."
+    if len(password.encode("utf-8")) > 1024:
+        return False, "Password too long. Please use 1024 bytes or fewer."
     with _conn() as con:
         row = con.execute("SELECT id, password_hash FROM users WHERE email=?", (email,)).fetchone()
     if not row: return False, "Invalid credentials."
     uid, hashed = row
-    if not bcrypt.verify(password, hashed): return False, "Invalid credentials."
+    try:
+        ok = bcrypt_sha256.verify(password, hashed)
+    except Exception:
+        ok = bcrypt.verify(password, hashed)
+    if not ok: return False, "Invalid credentials."
     st.session_state.user = {"email": email, "id": uid}
     return True, "Signed in."
 
