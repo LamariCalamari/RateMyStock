@@ -2,18 +2,20 @@
 import numpy as np
 import pandas as pd
 import streamlit as st
+from datetime import datetime
 from db import ensure_db, get_current_user_from_state, signup, login, list_portfolios, load_holdings, upsert_portfolio, delete_portfolio
 from app_utils import (
     inject_css, brand_header, yf_symbol, fetch_prices_chunked_with_fallback,
     technical_scores, fetch_fundamentals_simple, zscore_series,
     fetch_vix_series, fetch_gold_series, fetch_dxy_series, fetch_tnx_series,
-    fetch_credit_ratio_series, macro_from_signals
+    fetch_credit_ratio_series, macro_from_signals, fetch_sector
 )
 
 st.set_page_config(page_title="Portfolio Tracker", layout="wide")
 inject_css()
 ensure_db()
 brand_header("Portfolio Tracker")
+st.caption("Track positions, get a live portfolio score, and review allocation risk.")
 
 # Sidebar auth
 with st.sidebar:
@@ -33,9 +35,18 @@ with st.sidebar:
                 ok, msg = signup(e, p); st.success(msg) if ok else st.error(msg); st.rerun()
     else:
         st.success(f"Signed in as {user['email']}")
+        if st.button("Log out"):
+            from db import logout
+            logout()
+            st.rerun()
 
 user = get_current_user_from_state()
 user_id = user["id"] if user else None
+
+with st.expander("Data controls", expanded=False):
+    if st.button("Refresh market data"):
+        st.cache_data.clear()
+        st.rerun()
 
 # Editor
 portfolio_name = st.text_input("Portfolio name", value="My Portfolio")
@@ -145,6 +156,9 @@ with st.status("Fetching prices & computing…", expanded=False):
         st.error("Could not fetch prices for these tickers."); st.stop()
 
 latest = prices.ffill().iloc[-1].reindex(tickers).fillna(0.0)
+missing_prices = [t for t in tickers if t not in prices.columns]
+if missing_prices:
+    st.warning("Missing prices for: " + ", ".join(missing_prices))
 values = latest * shares.reindex(tickers).fillna(0.0)
 total_val = float(values.sum())
 day_change = prices.ffill().iloc[-1] / prices.ffill().iloc[-2] - 1.0 if prices.shape[0] >= 2 else pd.Series(0, index=prices.columns)
@@ -154,11 +168,32 @@ a,b,c = st.columns(3)
 a.metric("Portfolio Value", f"${total_val:,.2f}")
 b.metric("Day P&L", f"${day_pnl:,.2f}")
 c.metric("Positions", f"{len(tickers)}")
+st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
 aligned = prices.reindex(columns=tickers).ffill()
 port_value = (aligned * shares.reindex(aligned.columns).fillna(0.0)).sum(axis=1)
 st.line_chart(pd.DataFrame({"Portfolio value": port_value}), use_container_width=True)
 st.caption("Sum of constituent values using fixed positions (buy & hold).")
+
+st.markdown("### Allocation & Holdings")
+weights_pct = (values / (values.sum() or 1.0)) * 100.0
+day_pct = day_change.reindex(tickers).fillna(0.0) * 100.0
+holdings_tbl = pd.DataFrame({
+    "Price": latest.reindex(tickers),
+    "Shares": shares.reindex(tickers),
+    "Value": values.reindex(tickers),
+    "Allocation %": weights_pct.reindex(tickers),
+    "Day %": day_pct.reindex(tickers),
+})
+st.dataframe(holdings_tbl.round(4), use_container_width=True)
+
+st.bar_chart(pd.DataFrame({"Allocation %": weights_pct.reindex(tickers)}), use_container_width=True)
+
+sector_series = pd.Series({t: fetch_sector(t) for t in tickers})
+sector_mix = weights_pct.groupby(sector_series).sum().sort_values(ascending=False)
+if not sector_mix.empty:
+    st.markdown("### Sector Mix")
+    st.bar_chart(pd.DataFrame({"Allocation %": sector_mix}), use_container_width=True)
 
 # Live rating (same weights as main portfolio page, no diversification here)
 weights_by_value = (latest * shares).fillna(0.0)
@@ -201,18 +236,11 @@ tmp["FUND"] = FUND_score_all.reindex(idx_all)
 tmp["TECH"] = TECH_score_all.reindex(idx_all)
 tmp["MACRO"] = MACRO
 wf,wt,wm = 0.50,0.45,0.05; wsum=(wf+wt+wm) or 1.0; wf,wt,wm = wf/wsum,wt/wsum,wm/wsum
-weights = {"FUND": wf, "TECH": wt, "MACRO": wm}
-tmp["COMP"] = tmp.apply(_composite_row, axis=1, weights=weights)
+comp_weights = {"FUND": wf, "TECH": wt, "MACRO": wm}
+tmp["COMP"] = tmp.apply(_composite_row, axis=1, weights=comp_weights)
 tmp = tmp.join(weights, how="left").fillna({"weight":0.0})
 live_signal = float((tmp["COMP"]*tmp["weight"]).sum())
 live_score = float(np.clip((live_signal+1)/2, 0, 1)*100)
 
 st.markdown("### 🔮 Live ‘Rate My Portfolio’ Score")
 st.metric("Portfolio Score (0–100)", f"{live_score:.1f}")
-
-tbl = pd.DataFrame({
-    "Price": latest.reindex(tickers),
-    "Shares": shares.reindex(tickers),
-    "Value": values.reindex(tickers)
-})
-st.dataframe(tbl.round(4), use_container_width=True)

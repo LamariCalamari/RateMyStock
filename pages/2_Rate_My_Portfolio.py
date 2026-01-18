@@ -22,7 +22,7 @@ def normalize_percents_to_100(p: pd.Series) -> pd.Series:
     if s <= 0: return p
     return (p / s) * 100.0
 
-def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFrame:
+def sync_percent_amount(df: pd.DataFrame, total: float | None, mode: str) -> pd.DataFrame:
     df=df.copy()
     df["Ticker"]=df["Ticker"].astype(str).str.strip()
     df=df[df["Ticker"].astype(bool)].reset_index(drop=True)
@@ -51,9 +51,12 @@ def sync_percent_amount(df: pd.DataFrame, total: float, mode: str) -> pd.DataFra
                 df["Percent (%)"]=100.0/n
                 df["Amount"]= (df["Percent (%)"]/100.0*total).round(2)
     else:
-        if df["Percent (%)"].fillna(0).sum()==0:
-            df["Percent (%)"]=100.0/n
-        df["Percent (%)"]= normalize_percents_to_100(df["Percent (%)"]).round(2)
+        if mode == "amount" and df["Amount"].fillna(0).sum() > 0:
+            df["Percent (%)"] = (df["Amount"] / df["Amount"].sum() * 100.0).round(2)
+        else:
+            if df["Percent (%)"].fillna(0).sum()==0:
+                df["Percent (%)"]=100.0/n
+            df["Percent (%)"]= normalize_percents_to_100(df["Percent (%)"]).round(2)
 
     if has_total and df["Amount"].fillna(0).sum()>0:
         w=df["Amount"].fillna(0)/df["Amount"].fillna(0).sum()
@@ -83,7 +86,6 @@ if st.session_state.get("grid_df") is None:
 
 t1,t2,t3=st.columns([1,1,1])
 with t1: cur = st.selectbox("Currency", list(CURRENCY_MAP.keys()), index=0)
-with t2: total = st.number_input(f"Total portfolio value ({cur})", min_value=0.0, value=10000.0, step=500.0)
 with t3: st.caption("Holdings update only when you click **Apply changes**.")
 
 st.markdown(
@@ -102,6 +104,20 @@ sync_mode = st.segmented_control(
 mode_key = {"Percent → Amount": "percent", "Amount → Percent": "amount"}[sync_mode]
 
 auto_sync = st.checkbox("Auto-sync amounts", value=True)
+
+with t2:
+    if mode_key == "percent":
+        total = st.number_input(
+            f"Total portfolio value ({cur})",
+            min_value=0.0,
+            value=10000.0,
+            step=500.0
+        )
+    else:
+        total = None
+        current = st.session_state.get("grid_df", pd.DataFrame())
+        derived_total = float(_safe_num(current.get("Amount")).sum()) if not current.empty else 0.0
+        st.metric(f"Derived total ({cur})", f"{derived_total:,.2f}")
 
 committed = st.session_state["grid_df"].copy()
 percent_disabled = mode_key == "amount"
