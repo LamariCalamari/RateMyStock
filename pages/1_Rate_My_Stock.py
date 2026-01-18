@@ -161,27 +161,27 @@ st.markdown(
 
 idx = pd.Index(list(panel.keys()))
 out = pd.DataFrame(index=idx)
-    out["FUND_score"] = FUND_score.reindex(idx)
-    out["TECH_score"] = TECH_score.reindex(idx)
-    out["MACRO_score"]= MACRO
-    wsum = (w_f + w_t + w_m) or 1.0
-    wf, wt, wm = w_f/wsum, w_t/wsum, w_m/wsum
-    weights = {"FUND_score": wf, "TECH_score": wt, "MACRO_score": wm}
-    out["COMPOSITE"] = out.apply(_composite_row, axis=1, weights=weights)
-    ratings = percentile_rank(out["COMPOSITE"].dropna())
-    out["RATING_0_100"] = ratings.reindex(out.index)
-    def _reco(x):
-        if pd.isna(x): return "Insufficient data"
-        return "Strong Buy" if x>=80 else "Buy" if x>=60 else "Hold" if x>=40 else "Sell" if x>=20 else "Strong Sell"
-    out["RECO"] = out["RATING_0_100"].apply(_reco)
+out["FUND_score"] = FUND_score.reindex(idx)
+out["TECH_score"] = TECH_score.reindex(idx)
+out["MACRO_score"]= MACRO
+wsum = (w_f + w_t + w_m) or 1.0
+wf, wt, wm = w_f/wsum, w_t/wsum, w_m/wsum
+weights = {"FUND_score": wf, "TECH_score": wt, "MACRO_score": wm}
+out["COMPOSITE"] = out.apply(_composite_row, axis=1, weights=weights)
+ratings = percentile_rank(out["COMPOSITE"].dropna())
+out["RATING_0_100"] = ratings.reindex(out.index)
+def _reco(x):
+    if pd.isna(x): return "Insufficient data"
+    return "Strong Buy" if x>=80 else "Buy" if x>=60 else "Hold" if x>=40 else "Sell" if x>=20 else "Strong Sell"
+out["RECO"] = out["RATING_0_100"].apply(_reco)
 
-    tech_cols = [c for c in tech.columns if c.endswith("_z")]
-    fund_cols = [c for c in fdf.columns if c.endswith("_z")]
-    peer_factor = min(len(out["COMPOSITE"].dropna()) / max(target_count, 1), 1.0)
-    out["CONFIDENCE"] = [
-        100.0 * (0.4*peer_factor + 0.3*_coverage(fdf, t, fund_cols) + 0.3*_coverage(tech, t, tech_cols))
-        for t in out.index
-    ]
+tech_cols = [c for c in tech.columns if c.endswith("_z")]
+fund_cols = [c for c in fdf.columns if c.endswith("_z")]
+peer_factor = min(len(out["COMPOSITE"].dropna()) / max(target_count, 1), 1.0)
+out["CONFIDENCE"] = [
+    100.0 * (0.4*peer_factor + 0.3*_coverage(fdf, t, fund_cols) + 0.3*_coverage(tech, t, tech_cols))
+    for t in out.index
+]
 
 # 5Y momentum for SHOWN tickers only (quietly)
 show_idx = [t for t in user_tickers if t in out.index]
