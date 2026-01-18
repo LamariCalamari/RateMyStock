@@ -43,7 +43,8 @@ def ensure_db():
 def signup(email, password):
     email = (email or "").strip().lower()
     if not email or not password: return False, "Email and password required."
-    if len(password.encode("utf-8")) > 1024:
+    pw_bytes = password.encode("utf-8")
+    if len(pw_bytes) > 1024:
         return False, "Password too long. Please use 1024 bytes or fewer."
     try:
         with _conn() as con:
@@ -57,12 +58,15 @@ def signup(email, password):
 def login(email, password):
     email = (email or "").strip().lower()
     if not password: return False, "Password required."
-    if len(password.encode("utf-8")) > 1024:
+    pw_bytes = password.encode("utf-8")
+    if len(pw_bytes) > 1024:
         return False, "Password too long. Please use 1024 bytes or fewer."
     with _conn() as con:
         row = con.execute("SELECT id, password_hash FROM users WHERE email=?", (email,)).fetchone()
     if not row: return False, "Invalid credentials."
     uid, hashed = row
+    if hashed.startswith("$2") and len(pw_bytes) > 72:
+        return False, "Password too long for legacy accounts. Use 72 bytes or fewer."
     try:
         ok = bcrypt_sha256.verify(password, hashed)
     except Exception:

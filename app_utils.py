@@ -117,11 +117,16 @@ try:
 except Exception:
     _SP500, _NDX, _DOW = [], [], []
 
+_DELISTED = {
+    "FBHS", "NLSN", "PARA",
+}
+
 def _normalize_list(lst: Iterable[str]) -> List[str]:
     out, seen = [], set()
     for s in lst:
         if not isinstance(s, str): continue
         s = s.strip().upper().replace(".", "-")
+        if s in _DELISTED: continue
         if s and s not in seen:
             seen.add(s); out.append(s)
     return out

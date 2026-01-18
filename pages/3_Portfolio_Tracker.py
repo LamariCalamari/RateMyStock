@@ -189,7 +189,7 @@ st.dataframe(holdings_tbl.round(4), use_container_width=True)
 
 st.bar_chart(pd.DataFrame({"Allocation %": weights_pct.reindex(tickers)}), use_container_width=True)
 
-sector_series = pd.Series({t: fetch_sector(t) for t in tickers})
+sector_series = pd.Series({t: fetch_sector(t) for t in tickers}).fillna("Unknown")
 sector_mix = weights_pct.groupby(sector_series).sum().sort_values(ascending=False)
 if not sector_mix.empty:
     st.markdown("### Sector Mix")
