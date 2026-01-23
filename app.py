@@ -60,15 +60,19 @@ st.markdown(
 )
 
 def inline_logo_svg() -> str:
-    return """<svg class="logo" viewBox="0 0 100 90" xmlns="http://www.w3.org/2000/svg" aria-label="Rate My">
+    return """<svg class="logo" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" aria-label="Rate My">
   <defs>
-    <linearGradient id="g" x1="0" x2="0" y1="1" y2="0">
+    <linearGradient id="g" x1="0" x2="1" y1="1" y2="0">
       <stop offset="0%"  stop-color="#e74c3c"/>
       <stop offset="50%" stop-color="#f39c12"/>
       <stop offset="100%" stop-color="#2ecc71"/>
     </linearGradient>
   </defs>
-  <polygon points="50,5 95,85 5,85" fill="url(#g)"/>
+  <circle cx="60" cy="60" r="52" fill="none" stroke="url(#g)" stroke-width="8"/>
+  <rect x="34" y="64" width="10" height="22" rx="2" fill="#e8edf2"/>
+  <rect x="52" y="52" width="10" height="34" rx="2" fill="#e8edf2"/>
+  <rect x="70" y="40" width="10" height="46" rx="2" fill="#e8edf2"/>
+  <path d="M32 70 L57 48 L80 36" fill="none" stroke="url(#g)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>"""
 
 def brand_header(title: str):
