@@ -67,12 +67,17 @@ def inline_logo_svg() -> str:
       <stop offset="50%" stop-color="#f39c12"/>
       <stop offset="100%" stop-color="#2ecc71"/>
     </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
   </defs>
-  <circle cx="60" cy="60" r="52" fill="none" stroke="url(#g)" stroke-width="8"/>
-  <rect x="34" y="64" width="10" height="22" rx="2" fill="#e8edf2"/>
-  <rect x="52" y="52" width="10" height="34" rx="2" fill="#e8edf2"/>
-  <rect x="70" y="40" width="10" height="46" rx="2" fill="#e8edf2"/>
-  <path d="M32 70 L57 48 L80 36" fill="none" stroke="url(#g)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="60" cy="60" r="50" fill="none" stroke="url(#g)" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="60" cy="60" r="46" fill="url(#glow)"/>
+  <rect x="34" y="66" width="11" height="20" rx="5" fill="#eef1f5"/>
+  <rect x="52" y="52" width="11" height="34" rx="5" fill="#eef1f5"/>
+  <rect x="70" y="38" width="11" height="48" rx="5" fill="#eef1f5"/>
+  <path d="M32 70 Q44 61 56 50 T86 34" fill="none" stroke="url(#g)" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>"""
 
 def brand_header(title: str):
