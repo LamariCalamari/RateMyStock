@@ -1,4 +1,4 @@
-# pages/3_Portfolio_Tracker.py
+# pages/3_Portfolio_Tracker.py (deprecated)
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -15,6 +15,8 @@ st.set_page_config(page_title="Portfolio Tracker", layout="wide")
 inject_css()
 ensure_db()
 brand_header("Portfolio Tracker")
+st.info("Portfolio Tracker is currently paused while we focus on core rating features.")
+st.stop()
 st.caption("Track positions, get a live portfolio score, and review allocation risk.")
 
 # Sidebar auth

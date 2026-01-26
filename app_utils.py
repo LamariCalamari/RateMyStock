@@ -339,7 +339,7 @@ def fetch_profile(ticker: str) -> Dict[str, Optional[str]]:
 
 def build_universe(user_tickers: List[str], mode: str,
                    sample_n: int = 150, custom_raw: str = "",
-                   min_industry: int = 50, min_sector: int = 80) -> Tuple[List[str], str]:
+                   min_industry: int = 25, min_sector: int = 40) -> Tuple[List[str], str]:
     user = [yf_symbol(t) for t in user_tickers if t]
     user_set=set(user)
 
@@ -367,10 +367,10 @@ def build_universe(user_tickers: List[str], mode: str,
 
         if target_industry and len(industry_peers) >= min_industry:
             peers_all = industry_peers
-            label = f"Industry: {target_industry}"
+            label = f"Industry: {target_industry} ({len(industry_peers)})"
         elif target_sector and len(sector_peers) >= min_sector:
             peers_all = sector_peers
-            label = f"Sector: {target_sector}"
+            label = f"Sector: {target_sector} ({len(sector_peers)})"
         else:
             label = f"{label} (fallback)"
 
