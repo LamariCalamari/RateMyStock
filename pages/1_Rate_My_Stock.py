@@ -1,5 +1,6 @@
 # pages/Rate_My_Stock.py
 import io
+import re
 import time
 import numpy as np
 import pandas as pd
@@ -27,6 +28,57 @@ c_in_left, c_in_mid, c_in_right = st.columns([1,2,1])
 with c_in_mid:
     ticker = st.text_input(" ", "AAPL", label_visibility="collapsed",
                            placeholder="Type a ticker (e.g., AAPL)")
+
+def _looks_like_ticker(val: str) -> bool:
+    if not val:
+        return False
+    if " " in val:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9\.\-]{1,10}", val))
+
+resolved = None
+query = ticker.strip()
+if st.session_state.get("last_query") != query:
+    st.session_state["resolved_ticker"] = None
+    st.session_state["last_query"] = query
+if query and ("," not in query) and (not _looks_like_ticker(query)):
+    st.caption("Looks like a company name. Search and confirm the ticker below.")
+    with st.expander("Search company name", expanded=True):
+        results = []
+        try:
+            search = yf.Search(query)
+            results = search.quotes or []
+        except Exception:
+            results = []
+        if results:
+            best = results[0]
+            best_symbol = best.get("symbol")
+            best_name = best.get("shortname") or best.get("longname") or ""
+            best_ex = best.get("exchange") or "N/A"
+            if best_symbol:
+                st.info(f"Best match: {best_symbol} — {best_name} ({best_ex})")
+                if st.button("Use best match"):
+                    resolved = best_symbol
+                    st.session_state["resolved_ticker"] = resolved
+        if results:
+            options = [
+                (r.get("symbol"), f"{r.get('symbol')} — {r.get('shortname') or r.get('longname') or ''} ({r.get('exchange') or 'N/A'})")
+                for r in results
+                if r.get("symbol")
+            ]
+            labels = [o[1] for o in options]
+            picked = st.selectbox("Select company", labels, index=0)
+            picked_symbol = dict(options).get(picked)
+            if st.button("Use selected ticker"):
+                resolved = picked_symbol
+                st.session_state["resolved_ticker"] = resolved
+        else:
+            st.info("No matches found. Try a different company name.")
+
+resolved = st.session_state.get("resolved_ticker") if resolved is None else resolved
+if resolved:
+    st.success(f"Using ticker: {resolved}")
+    ticker = resolved
 
 peer_label_ph = None
 

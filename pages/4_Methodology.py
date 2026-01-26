@@ -19,6 +19,14 @@ st.markdown(
     "to a 0–100 rating and a recommendation label."
 )
 
+st.markdown("## 🔎 Worked Example (Simplified)")
+st.markdown(
+    "Imagine a stock with strong revenue growth, above‑peer ROE, and positive momentum, but a high "
+    "valuation. The growth and profitability z‑scores push the fundamentals score up, valuation pulls it down. "
+    "Technicals add a positive lift if momentum is strong, and macro can tilt the score if risk conditions are favorable. "
+    "The final rating is the stock’s percentile rank within its peer group."
+)
+
 st.markdown("## 1) Peer Universe")
 st.markdown(
     "- **Primary:** same industry peers.  \n"
@@ -58,6 +66,14 @@ st.markdown(
     "For valuation and leverage where *lower is better*, we invert before z‑scoring."
 )
 
+st.markdown("## 4) Weighting (Defaults)")
+st.markdown(
+    "- **Fundamentals:** 50%  \n"
+    "- **Technicals:** 45%  \n"
+    "- **Macro:** 5%  \n"
+    "Weights can be adjusted in Advanced Settings."
+)
+
 st.markdown("## 4) Composite Score")
 st.markdown(
     "We compute a weighted average of available factor groups:  \n"
@@ -83,6 +99,15 @@ st.markdown(
     "- Peer coverage (how many peers actually loaded)  \n"
     "- Fundamentals coverage (% of factor z‑scores available)  \n"
     "- Technicals coverage (% of factor z‑scores available)"
+)
+
+st.markdown("## 📚 Factor Glossary (Short)")
+st.markdown(
+    "- **FCF yield:** Free cash flow / market cap (higher is better).  \n"
+    "- **EV/EBITDA:** Valuation multiple (lower is better).  \n"
+    "- **DMA gap:** Price relative to EMA50 (trend).  \n"
+    "- **MACD histogram:** Momentum acceleration.  \n"
+    "- **RSI strength:** Trend strength (0–100)."
 )
 
 st.markdown("## ⚠️ Notes & Limitations")
