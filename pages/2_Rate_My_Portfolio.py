@@ -319,14 +319,26 @@ with tabs[0]:
     st.subheader("Cumulative growth (set = 1.0)")
     st.line_chart(pd.DataFrame({"Portfolio cumulative": eq}), use_container_width=True)
     st.caption("Growth of 1.0 invested, using your current weights over the chosen history.")
+    st.markdown(
+        "- Shows the compounded performance of the portfolio.  \n"
+        "- Steeper slope = faster growth; flat/declining = weak period."
+    )
 with tabs[1]:
     st.subheader("Volatility & rolling Sharpe (60-day)")
     vol60 = port_r.rolling(60).std()*np.sqrt(252)
     sharpe60 = (port_r.rolling(60).mean()/port_r.rolling(60).std())*np.sqrt(252)
     st.line_chart(pd.DataFrame({"Volatility 60d (ann.)": vol60, "Sharpe 60d": sharpe60}), use_container_width=True)
     st.caption("Lower volatility & higher Sharpe are preferred.")
+    st.markdown(
+        "- **Volatility** = typical fluctuation; lower is smoother.  \n"
+        "- **Sharpe** = return per unit of risk; higher is better."
+    )
 with tabs[2]:
     st.subheader("Drawdown")
     roll_max = eq.cummax(); dd = eq/roll_max - 1
     st.line_chart(pd.DataFrame({"Drawdown": dd}), use_container_width=True)
     st.caption("Depth of falls from prior peaks (risk perspective).")
+    st.markdown(
+        "- Drawdown shows the percent drop from the last peak.  \n"
+        "- Deeper, longer drawdowns indicate higher risk."
+    )

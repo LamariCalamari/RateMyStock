@@ -174,6 +174,10 @@ aligned = prices.reindex(columns=tickers).ffill()
 port_value = (aligned * shares.reindex(aligned.columns).fillna(0.0)).sum(axis=1)
 st.line_chart(pd.DataFrame({"Portfolio value": port_value}), use_container_width=True)
 st.caption("Sum of constituent values using fixed positions (buy & hold).")
+st.markdown(
+    "- This is the historical value of your holdings with shares held constant.  \n"
+    "- Rising line = portfolio grew; dips show drawdowns."
+)
 
 st.markdown("### Allocation & Holdings")
 weights_pct = (values / (values.sum() or 1.0)) * 100.0
@@ -188,12 +192,14 @@ holdings_tbl = pd.DataFrame({
 st.dataframe(holdings_tbl.round(4), use_container_width=True)
 
 st.bar_chart(pd.DataFrame({"Allocation %": weights_pct.reindex(tickers)}), use_container_width=True)
+st.caption("Allocation shows current weight of each holding by market value.")
 
 sector_series = pd.Series({t: fetch_sector(t) for t in tickers}).fillna("Unknown")
 sector_mix = weights_pct.groupby(sector_series).sum().sort_values(ascending=False)
 if not sector_mix.empty:
     st.markdown("### Sector Mix")
     st.bar_chart(pd.DataFrame({"Allocation %": sector_mix}), use_container_width=True)
+    st.caption("Sector mix groups holdings by sector to show concentration risk.")
 
 # Live rating (same weights as main portfolio page, no diversification here)
 weights_by_value = (latest * shares).fillna(0.0)

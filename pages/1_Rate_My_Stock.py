@@ -541,23 +541,47 @@ for t in show_idx:
             e20, e50 = ema(series,20), ema(series,50)
             price_df = pd.DataFrame({"Close": series, "EMA20": e20, "EMA50": e50})
             st.line_chart(price_df, use_container_width=True)
-            st.caption("EMA = exponential moving average. Price above EMA50/EMA20 implies uptrend bias; below implies headwind.")
+            st.caption(
+                "EMA (exponential moving average) smooths price. "
+                "EMA20 = short‑term trend, EMA50 = medium‑term trend."
+            )
+            st.markdown(
+                "- If **price stays above EMA20/EMA50**, the trend is generally bullish.  \n"
+                "- If **price crosses below**, it signals weakening momentum.  \n"
+                "- When **EMA20 crosses above EMA50**, trend strength is improving (and vice‑versa)."
+            )
 
             st.subheader("📉 MACD")
             line, sig, hist = macd(series)
             st.line_chart(pd.DataFrame({"MACD line": line, "Signal": sig}), use_container_width=True)
             st.bar_chart(pd.DataFrame({"Histogram": hist}), use_container_width=True)
-            st.caption("MACD compares two EMAs. Histogram > 0 suggests momentum building; < 0 suggests fading.")
+            st.caption("MACD measures momentum by comparing a fast EMA to a slow EMA.")
+            st.markdown(
+                "- **MACD line** = momentum direction.  \n"
+                "- **Signal line** = smoothed MACD for crossover signals.  \n"
+                "- **Histogram** = MACD minus Signal (momentum acceleration).  \n"
+                "- Cross above Signal + rising histogram → momentum building; below → momentum fading."
+            )
 
             st.subheader("🔁 RSI (14)")
             st.line_chart(pd.DataFrame({"RSI(14)": rsi(series)}), use_container_width=True)
-            st.caption("RSI measures trend strength: >70 overbought, <30 oversold, ~50 neutral.")
+            st.caption("RSI is an oscillator that measures trend strength (0–100).")
+            st.markdown(
+                "- **>70** often means overbought (price extended).  \n"
+                "- **<30** often means oversold (price stretched down).  \n"
+                "- **~50** is neutral; rising RSI confirms uptrend strength."
+            )
 
             st.subheader("🚀 12-month momentum")
             if len(series) > 252:
                 mom12 = series/series.shift(253)-1.0
                 st.line_chart(pd.DataFrame({"12m momentum": mom12}), use_container_width=True)
-                st.caption("12m momentum compares today to ~1 year ago; positive implies outperformance.")
+                st.caption("12m momentum compares today to ~1 year ago.")
+                st.markdown(
+                    "- **>0** = price above last year (relative strength).  \n"
+                    "- **<0** = price below last year (weakness).  \n"
+                    "- Rising momentum → improving trend strength."
+                )
             else:
                 st.info("Need > 1 year of data to show the 12-month momentum line.")
 
