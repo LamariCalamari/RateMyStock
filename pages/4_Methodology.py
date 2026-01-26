@@ -1,4 +1,5 @@
 import streamlit as st
+import pandas as pd
 from app_utils import inject_css, brand_header
 
 st.set_page_config(page_title="Methodology", layout="wide")
