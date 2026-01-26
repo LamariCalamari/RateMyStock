@@ -8,7 +8,8 @@ from app_utils import (
     inject_css, brand_header, yf_symbol, fetch_prices_chunked_with_fallback,
     technical_scores, fetch_fundamentals_simple, zscore_series,
     fetch_vix_series, fetch_gold_series, fetch_dxy_series, fetch_tnx_series,
-    fetch_credit_ratio_series, macro_from_signals, fetch_sector
+    fetch_credit_ratio_series, macro_from_signals, fetch_sector,
+    SCORING_CONFIG, score_label
 )
 
 st.set_page_config(page_title="Portfolio Tracker", layout="wide")
@@ -138,7 +139,8 @@ if port.empty:
     st.info("Add at least one holding to track.")
     st.stop()
 
-def _cap_z(s: pd.Series, cap: float = 3.0) -> pd.Series:
+def _cap_z(s: pd.Series, cap: float | None = None) -> pd.Series:
+    cap = SCORING_CONFIG["z_cap"] if cap is None else cap
     return s.clip(-cap, cap)
 
 def _composite_row(row: pd.Series, weights: dict) -> float:
@@ -219,7 +221,7 @@ core_fund = [
 ]
 core_present = [c for c in core_fund if c in fund_raw_all.columns]
 if core_present:
-    min_fund_cols = 4
+    min_fund_cols = SCORING_CONFIG["min_fund_cols"]
     fund_raw_all = fund_raw_all[fund_raw_all[core_present].notna().sum(axis=1) >= min_fund_cols]
 fdf_all = pd.DataFrame(index=fund_raw_all.index)
 for col in ["revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
@@ -241,7 +243,10 @@ tmp = pd.DataFrame(index=idx_all)
 tmp["FUND"] = FUND_score_all.reindex(idx_all)
 tmp["TECH"] = TECH_score_all.reindex(idx_all)
 tmp["MACRO"] = MACRO
-wf,wt,wm = 0.50,0.45,0.05; wsum=(wf+wt+wm) or 1.0; wf,wt,wm = wf/wsum,wt/wsum,wm/wsum
+wsum = sum(SCORING_CONFIG["weights"].values()) or 1.0
+wf = SCORING_CONFIG["weights"]["fund"] / wsum
+wt = SCORING_CONFIG["weights"]["tech"] / wsum
+wm = SCORING_CONFIG["weights"]["macro"] / wsum
 comp_weights = {"FUND": wf, "TECH": wt, "MACRO": wm}
 tmp["COMP"] = tmp.apply(_composite_row, axis=1, weights=comp_weights)
 tmp = tmp.join(weights, how="left").fillna({"weight":0.0})
@@ -250,6 +255,7 @@ live_score = float(np.clip((live_signal+1)/2, 0, 1)*100)
 
 st.markdown("### 🔮 Live ‘Rate My Portfolio’ Score")
 st.metric("Portfolio Score (0–100)", f"{live_score:.1f}")
+st.caption(f"Interpretation: **{score_label(live_score)}**.")
 def _score_label(score: float) -> str:
     if score >= 80: return "Strong Buy"
     if score >= 60: return "Buy"

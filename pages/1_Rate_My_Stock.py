@@ -13,7 +13,7 @@ from app_utils import (
     zscore_series, percentile_rank, fetch_prices_chunked_with_fallback,
     fetch_fundamentals_simple, technical_scores, fetch_vix_series, fetch_gold_series,
     fetch_dxy_series, fetch_tnx_series, fetch_credit_ratio_series, macro_from_signals,
-    fundamentals_interpretation, build_universe,
+    fundamentals_interpretation, build_universe, SCORING_CONFIG, score_label,
     # NEW:
     fetch_company_statements, statement_metrics, interpret_statement_metrics,
     build_compact_statements, _CURRENCY_SYMBOL
@@ -94,9 +94,9 @@ with st.expander("Advanced settings", expanded=False):
     with c3:
         history = st.selectbox("History for signals", ["1y","2y"], index=0)
     c4,c5,c6 = st.columns(3)
-    with c4: w_f = st.slider("Weight: Fundamentals", 0.0, 1.0, 0.50, 0.05)
-    with c5: w_t = st.slider("Weight: Technicals",   0.0, 1.0, 0.45, 0.05)
-    with c6: w_m = st.slider("Weight: Macro (Multi-signal)",  0.0, 1.0, 0.05, 0.05)
+    with c4: w_f = st.slider("Weight: Fundamentals", 0.0, 1.0, SCORING_CONFIG["weights"]["fund"], 0.05)
+    with c5: w_t = st.slider("Weight: Technicals",   0.0, 1.0, SCORING_CONFIG["weights"]["tech"], 0.05)
+    with c6: w_m = st.slider("Weight: Macro (Multi-signal)",  0.0, 1.0, SCORING_CONFIG["weights"]["macro"], 0.05)
     custom_raw = st.text_area("Custom peers (comma-separated)", "") \
                   if universe_mode=="Custom (paste list)" else ""
     fast_mode = st.checkbox("Fast mode (fewer peers, faster load)", value=False)
@@ -128,7 +128,8 @@ if not st.session_state.get("analysis_ready"):
     st.info("Adjust settings, then click **Start analysis**.")
     st.stop()
 
-def _cap_z(s: pd.Series, cap: float = 3.0) -> pd.Series:
+def _cap_z(s: pd.Series, cap: float | None = None) -> pd.Series:
+    cap = SCORING_CONFIG["z_cap"] if cap is None else cap
     return s.clip(-cap, cap)
 
 def _composite_row(row: pd.Series, weights: Dict[str, float]) -> float:
@@ -191,7 +192,7 @@ with st.status("Crunching the numbers…", expanded=True) as status:
     ]
     core_present = [c for c in core_fund if c in fund_raw.columns]
     if core_present:
-        min_fund_cols = 4
+        min_fund_cols = SCORING_CONFIG["min_fund_cols"]
         fund_raw = fund_raw[fund_raw[core_present].notna().sum(axis=1) >= min_fund_cols]
     fdf = pd.DataFrame(index=fund_raw.index)
     for col in ["revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
@@ -245,18 +246,52 @@ weights = {"FUND_score": wf, "TECH_score": wt, "MACRO_score": wm}
 out["COMPOSITE"] = out.apply(_composite_row, axis=1, weights=weights)
 ratings = percentile_rank(out["COMPOSITE"].dropna())
 out["RATING_0_100"] = ratings.reindex(out.index)
-def _reco(x):
-    if pd.isna(x): return "Insufficient data"
-    return "Strong Buy" if x>=80 else "Buy" if x>=60 else "Hold" if x>=40 else "Sell" if x>=20 else "Strong Sell"
-out["RECO"] = out["RATING_0_100"].apply(_reco)
+    out["RECO"] = out["RATING_0_100"].apply(score_label)
 
-tech_cols = [c for c in tech.columns if c.endswith("_z")]
-fund_cols = [c for c in fdf.columns if c.endswith("_z")]
-peer_factor = min(len(out["COMPOSITE"].dropna()) / max(target_count, 1), 1.0)
+    tech_cols = [c for c in tech.columns if c.endswith("_z")]
+    fund_cols = [c for c in fdf.columns if c.endswith("_z")]
+    peer_factor = min(len(out["COMPOSITE"].dropna()) / max(target_count, 1), 1.0)
+    cw = SCORING_CONFIG["confidence_weights"]
 out["CONFIDENCE"] = [
-    100.0 * (0.4*peer_factor + 0.3*_coverage(fdf, t, fund_cols) + 0.3*_coverage(tech, t, tech_cols))
+    100.0 * (cw["peer"]*peer_factor + cw["fund"]*_coverage(fdf, t, fund_cols) + cw["tech"]*_coverage(tech, t, tech_cols))
     for t in out.index
 ]
+
+overall_conf = float(out["CONFIDENCE"].mean()) if not out["CONFIDENCE"].empty else 0.0
+m1, m2, m3 = st.columns(3)
+m1.metric("Peers loaded", f"{len(panel)}/{target_count}")
+m2.metric("Peer set", label)
+m3.metric("Avg confidence", f"{overall_conf:.0f}/100")
+
+st.markdown("### Score Bands")
+def _band(score: float) -> int:
+    if np.isnan(score): return -1
+    if score >= 80: return 4
+    if score >= 60: return 3
+    if score >= 40: return 2
+    if score >= 20: return 1
+    return 0
+
+avg_score = float(out["RATING_0_100"].mean()) if not out["RATING_0_100"].empty else np.nan
+active = _band(avg_score)
+bands = [
+    ("0–19", "#e74c3c"),
+    ("20–39", "#f39c12"),
+    ("40–59", "#f1c40f"),
+    ("60–79", "#8bc34a"),
+    ("80–100", "#2ecc71"),
+]
+cells = []
+for i, (label, color) in enumerate(bands):
+    ring = "box-shadow:0 0 0 2px #fff inset;" if i == active else ""
+    text = "color:#111;" if i >= 2 else ""
+    cells.append(
+        f"<div style='flex:1;background:{color};padding:8px;border-radius:6px;text-align:center;{text}{ring}'>"
+        f"{label}</div>"
+    )
+st.markdown(f"<div style='display:flex;gap:6px;'>{''.join(cells)}</div>", unsafe_allow_html=True)
+if not np.isnan(avg_score):
+    st.caption(f"Average score band highlighted (avg score {avg_score:.1f}).")
 
 # 5Y momentum for SHOWN tickers only (quietly)
 show_idx = [t for t in user_tickers if t in out.index]
@@ -291,6 +326,48 @@ for t in show_idx:
         c2.markdown(f'<div class="kpi-card"><div>Technicals</div><div class="kpi-num">{table.loc[t,"TECH_score"]:.3f}</div></div>', unsafe_allow_html=True)
         c3.markdown(f'<div class="kpi-card"><div>Macro (Multi-signal)</div><div class="kpi-num">{table.loc[t,"MACRO_score"]:.3f}</div></div>', unsafe_allow_html=True)
         st.caption(f"Confidence: {table.loc[t,'CONFIDENCE']:.0f}/100")
+
+        # Top drivers
+        fund_map = {
+            "revenueGrowth_z": "Revenue growth",
+            "earningsGrowth_z": "Earnings growth",
+            "returnOnEquity_z": "ROE",
+            "returnOnAssets_z": "ROA",
+            "profitMargins_z": "Profit margin",
+            "grossMargins_z": "Gross margin",
+            "operatingMargins_z": "Operating margin",
+            "ebitdaMargins_z": "EBITDA margin",
+            "trailingPE_z": "P/E (lower is better)",
+            "forwardPE_z": "Forward P/E (lower is better)",
+            "enterpriseToEbitda_z": "EV/EBITDA (lower is better)",
+            "fcfYield_z": "FCF yield",
+            "debtToEquity_z": "Debt/Equity (lower is better)",
+        }
+        tech_map = {
+            "dma_gap_z": "Price vs EMA50",
+            "macd_hist_z": "MACD momentum",
+            "rsi_strength_z": "RSI strength",
+            "mom12m_z": "12m momentum",
+        }
+        zrow = {}
+        if t in fdf.index:
+            zrow.update({k: fdf.loc[t, k] for k in fdf.columns if k in fund_map})
+        if t in tech.index:
+            for k in tech_map:
+                if k in tech.columns:
+                    zrow[k] = tech.loc[t, k]
+        zser = pd.Series(zrow).dropna()
+        if not zser.empty:
+            pos = zser.sort_values(ascending=False).head(2)
+            neg = zser.sort_values(ascending=True).head(2)
+            st.markdown("**Top positives**")
+            for k, v in pos.items():
+                label = fund_map.get(k, tech_map.get(k, k))
+                st.markdown(f"- {label}: **{v:+.2f}z**")
+            st.markdown("**Top headwinds**")
+            for k, v in neg.items():
+                label = fund_map.get(k, tech_map.get(k, k))
+                st.markdown(f"- {label}: **{v:+.2f}z**")
 
         # Fundamentals table
         st.markdown("#### Fundamentals — peer-relative z-scores")

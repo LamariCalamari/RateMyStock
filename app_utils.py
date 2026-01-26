@@ -8,6 +8,32 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
+# =============================== Scoring Config ===============================
+
+SCORING_CONFIG = {
+    "weights": {"fund": 0.50, "tech": 0.45, "macro": 0.05},
+    "z_cap": 3.0,
+    "min_fund_cols": 4,
+    "peer_min_industry": 25,
+    "peer_min_sector": 40,
+    "confidence_weights": {"peer": 0.4, "fund": 0.3, "tech": 0.3},
+    "rating_bins": [
+        (80, "Strong Buy"),
+        (60, "Buy"),
+        (40, "Hold"),
+        (20, "Sell"),
+        (0,  "Strong Sell"),
+    ],
+}
+
+def score_label(score: float) -> str:
+    if score is None or np.isnan(score):
+        return "Insufficient data"
+    for cutoff, label in SCORING_CONFIG["rating_bins"]:
+        if score >= cutoff:
+            return label
+    return "Insufficient data"
+
 
 # =============================== UI: CSS + Brand ===============================
 
@@ -343,7 +369,7 @@ def fetch_profile(ticker: str) -> Dict[str, Optional[str]]:
 
 def build_universe(user_tickers: List[str], mode: str,
                    sample_n: int = 150, custom_raw: str = "",
-                   min_industry: int = 25, min_sector: int = 40) -> Tuple[List[str], str]:
+                   min_industry: int | None = None, min_sector: int | None = None) -> Tuple[List[str], str]:
     user = [yf_symbol(t) for t in user_tickers if t]
     user_set=set(user)
 
@@ -357,6 +383,11 @@ def build_universe(user_tickers: List[str], mode: str,
         for lbl in ("S&P 500","Dow 30","NASDAQ 100"):
             if user_set & set(PEER_CATALOG.get(lbl,[])): chosen=lbl; break
         peers_all=[t for t in PEER_CATALOG.get(chosen,[]) if t not in user_set]; label=chosen
+
+    if min_industry is None:
+        min_industry = SCORING_CONFIG["peer_min_industry"]
+    if min_sector is None:
+        min_sector = SCORING_CONFIG["peer_min_sector"]
 
     auto_modes = ("Industry (auto fallback)", "Auto (industry → sector → index)", "Auto by index membership")
     if mode in auto_modes and user:
@@ -1149,4 +1180,6 @@ __all__ = [
     # predictor & gaussian 2D
     "predict_price","gaussian2d_fit","gaussian2d_centrality",
     "stock_return_vol_features","peer_return_vol_matrix",
+    # config
+    "SCORING_CONFIG","score_label",
 ]

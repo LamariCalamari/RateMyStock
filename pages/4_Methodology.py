@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from app_utils import inject_css, brand_header
+from app_utils import inject_css, brand_header, SCORING_CONFIG
 
 st.set_page_config(page_title="Methodology", layout="wide")
 inject_css()
@@ -144,6 +144,14 @@ st.markdown(
     "- Credit ratio (HYG/LQD)"
 )
 
+st.markdown("## 2b) Technical Indicator Formulas (Simplified)")
+st.markdown(
+    "- **EMA:** `EMA_t = α·Price_t + (1−α)·EMA_(t−1)`  \n"
+    "- **MACD:** `MACD = EMA(12) − EMA(26)`; **Signal** = EMA(9) of MACD; **Histogram** = MACD − Signal  \n"
+    "- **RSI:** based on average gains/losses over 14 periods (0–100)  \n"
+    "- **Momentum (12m):** `Price_t / Price_(t−12m) − 1`"
+)
+
 st.markdown("## 3) Standardization")
 st.markdown(
     "Each numeric factor is **z‑scored** against the peer group and clipped to reduce outliers:  \n"
@@ -153,39 +161,42 @@ st.markdown(
 
 st.markdown("## 4) Weighting (Defaults)")
 st.markdown(
-    "- **Fundamentals:** 50%  \n"
-    "- **Technicals:** 45%  \n"
-    "- **Macro:** 5%  \n"
+    f"- **Fundamentals:** {SCORING_CONFIG['weights']['fund']*100:.0f}%  \n"
+    f"- **Technicals:** {SCORING_CONFIG['weights']['tech']*100:.0f}%  \n"
+    f"- **Macro:** {SCORING_CONFIG['weights']['macro']*100:.0f}%  \n"
     "Weights can be adjusted in Advanced Settings."
 )
 
-st.markdown("## 4) Composite Score")
+st.markdown("## 5) Composite Score")
 st.markdown(
     "We compute a weighted average of available factor groups:  \n"
     "`Composite = wF·Fund + wT·Tech + wM·Macro`  \n"
     "If a factor group is missing for a ticker, weights are re‑normalized over the available groups."
 )
 
-st.markdown("## 4b) Portfolio Score (Weighted Holdings)")
+st.markdown("## 6) Portfolio Score (Weighted Holdings)")
 st.markdown(
     "For a portfolio, each holding’s composite score is weighted by its portfolio allocation:  \n"
     "`PortfolioSignal = Σ(Weight_i × Composite_i)`  \n"
     "We then blend a small diversification bonus to reward lower concentration and lower correlations."
 )
+st.markdown(
+    "**Diversification (simplified):**  \n"
+    "- **Sector diversity:** effective number of sectors based on weights  \n"
+    "- **Name concentration:** penalizes very large single positions  \n"
+    "- **Correlation:** penalizes highly correlated holdings  \n"
+    "Final diversification score = `0.5·Sector + 0.3·Correlation + 0.2·Concentration`"
+)
 
-st.markdown("## 5) Rating & Recommendation")
+st.markdown("## 7) Rating & Recommendation")
 st.markdown(
     "We rank the composite score among peers into a percentile score:  \n"
     "`Rating = percentile_rank(Composite) × 100`  \n"
     "**Labels:**  \n"
-    "- 80+ = Strong Buy  \n"
-    "- 60–79 = Buy  \n"
-    "- 40–59 = Hold  \n"
-    "- 20–39 = Sell  \n"
-    "- <20 = Strong Sell"
+    + "\n".join([f"- {int(cutoff)}+ = {label}" for cutoff, label in SCORING_CONFIG["rating_bins"]])
 )
 
-st.markdown("## 6) Confidence")
+st.markdown("## 8) Confidence")
 st.markdown(
     "Confidence reflects data coverage and peer sample size:  \n"
     "- Peer coverage (how many peers actually loaded)  \n"
