@@ -109,7 +109,8 @@ with c2:
 
 with c3:
     st.markdown('<div class="cta dark">', unsafe_allow_html=True)
-    st.button("📊  Portfolio Tracker", use_container_width=True, key="cta_tracker", disabled=True)
+    if st.button("📊  Portfolio Tracker", use_container_width=True, key="cta_tracker"):
+        st.switch_page("pages/3_Portfolio_Tracker.py")
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------- Footer hint ----------
