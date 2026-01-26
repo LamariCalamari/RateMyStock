@@ -216,18 +216,22 @@ st.markdown(
 )
 
 st.markdown("## 🎯 How to Read Scores (Quick Legend)")
-legend = pd.DataFrame(
-    {
-        "Score Range": ["80–100", "60–79", "40–59", "20–39", "0–19"],
-        "Label": ["Strong Buy", "Buy", "Hold", "Sell", "Strong Sell"],
-        "Color": ["#2ecc71", "#8bc34a", "#f1c40f", "#f39c12", "#e74c3c"],
-        "Meaning": [
-            "Top of peers; strongest signals across factors",
-            "Above‑average vs peers",
-            "Around peer average",
-            "Below‑average vs peers",
-            "Bottom of peers; weakest signals",
-        ],
-    }
-)
-st.dataframe(legend, use_container_width=True)
+legend_rows = [
+    ("80–100", "Strong Buy", "#2ecc71", "Top of peers; strongest signals across factors"),
+    ("60–79", "Buy", "#8bc34a", "Above‑average vs peers"),
+    ("40–59", "Hold", "#f1c40f", "Around peer average"),
+    ("20–39", "Sell", "#f39c12", "Below‑average vs peers"),
+    ("0–19", "Strong Sell", "#e74c3c", "Bottom of peers; weakest signals"),
+]
+st.markdown("<div style='display:grid;gap:8px;'>", unsafe_allow_html=True)
+for rng, label, color, meaning in legend_rows:
+    st.markdown(
+        f"<div style='display:grid;grid-template-columns:80px 140px 1fr;align-items:center;"
+        f"background:#151920;border:1px solid #2c3239;border-radius:10px;padding:10px 12px;'>"
+        f"<div style='font-weight:700;'>{rng}</div>"
+        f"<div style='font-weight:700;color:{color};'>{label}</div>"
+        f"<div style='color:#cfd4da;'>{meaning}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+st.markdown("</div>", unsafe_allow_html=True)
