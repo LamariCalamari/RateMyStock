@@ -21,10 +21,88 @@ st.markdown(
 
 st.markdown("## 🔎 Worked Example (Simplified)")
 st.markdown(
-    "Imagine a stock with strong revenue growth, above‑peer ROE, and positive momentum, but a high "
-    "valuation. The growth and profitability z‑scores push the fundamentals score up, valuation pulls it down. "
-    "Technicals add a positive lift if momentum is strong, and macro can tilt the score if risk conditions are favorable. "
-    "The final rating is the stock’s percentile rank within its peer group."
+    "Below is a simplified, illustrative example to show how a score is built and interpreted."
+)
+st.markdown("**Example ticker:** Acme Corp (fictional)")
+st.markdown(
+    "- Peer set: Industry peers (n=120)  \n"
+    "- Weights: Fundamentals 50%, Technicals 45%, Macro 5%"
+)
+st.table(
+    {
+        "Component": ["Fundamentals", "Technicals", "Macro", "Composite"],
+        "Score": [0.55, 0.30, 0.40, 0.43],
+        "Interpretation": [
+            "Strong growth + margins; valuation slightly expensive",
+            "Momentum positive but cooling (MACD flattening)",
+            "Neutral risk backdrop",
+            "Above‑average vs peers",
+        ],
+    }
+)
+st.markdown(
+    "**Interpretation:** The stock scores above peer average because fundamentals are strong. "
+    "Technicals are positive but not exceptional, so the composite is good but not top‑tier. "
+    "This would typically map to a **Buy** (e.g., 60–79 percentile) depending on peers."
+)
+
+st.markdown("## 🧮 Detailed Walkthrough (Numbers)")
+st.markdown("**Step A — Raw inputs (sample values):**")
+st.table(
+    {
+        "Metric": ["Revenue growth", "ROE", "FCF yield", "Forward PE", "EMA gap", "MACD hist", "RSI", "12m momentum", "VIX", "Gold 3m"],
+        "Value": ["18%", "22%", "4.5%", "28×", "6%", "0.12", "62", "14%", "16", "-2%"],
+    }
+)
+
+st.markdown("**Step B — Convert to peer‑relative z‑scores:**")
+st.table(
+    {
+        "Metric": ["Revenue growth", "ROE", "FCF yield", "Forward PE (inverted)", "EMA gap", "MACD hist", "RSI strength", "12m momentum"],
+        "Z‑score": [0.9, 0.7, 0.4, -0.6, 0.5, 0.2, 0.3, 0.6],
+        "Notes": [
+            "Above peer average",
+            "Above peer average",
+            "Slightly above",
+            "Valuation richer than peers",
+            "Price above EMA50",
+            "Momentum modestly positive",
+            "Trend strength moderate",
+            "Solid 12‑month trend",
+        ],
+    }
+)
+
+st.markdown("**Step C — Aggregate factor groups:**")
+st.table(
+    {
+        "Group": ["Fundamentals", "Technicals", "Macro"],
+        "Formula": [
+            "avg(z of growth, profitability, valuation, balance)",
+            "avg(z of EMA gap, MACD hist, RSI strength, 12m mom)",
+            "multi‑signal risk score",
+        ],
+        "Score": [0.55, 0.30, 0.40],
+    }
+)
+
+st.markdown("**Step D — Composite score:**")
+st.code("Composite = 0.50×0.55 + 0.45×0.30 + 0.05×0.40 = 0.43")
+
+st.markdown("**Step E — Percentile ranking to 0–100:**")
+st.markdown(
+    "If the composite ranks at the 68th percentile among peers, the rating = **68/100**, "
+    "which maps to **Buy**."
+)
+
+st.markdown("**Step F — Confidence (example):**")
+st.markdown(
+    "Confidence blends peer coverage, fundamentals coverage, and technicals coverage.  \n"
+    "Example values:  \n"
+    "- Peer coverage = 0.85 (102 of 120 peers loaded)  \n"
+    "- Fundamentals coverage = 0.75  \n"
+    "- Technicals coverage = 0.90  \n"
+    "Confidence = 100 × (0.4×0.85 + 0.3×0.75 + 0.3×0.90) = **83/100**"
 )
 
 st.markdown("## 1) Peer Universe")
