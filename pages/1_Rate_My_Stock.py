@@ -1,4 +1,5 @@
 # pages/Rate_My_Stock.py
+import io
 import time
 import numpy as np
 import pandas as pd
@@ -55,6 +56,24 @@ with st.expander("Advanced settings", expanded=False):
 user_tickers = [yf_symbol(x) for x in ticker.split(",") if x.strip()]
 if not user_tickers:
     st.info("Enter a ticker above to run the rating.")
+    st.stop()
+
+sig = (
+    tuple(user_tickers), universe_mode, peer_n, history, w_f, w_t, w_m,
+    custom_raw, fast_mode
+)
+if st.session_state.get("analysis_sig") != sig:
+    st.session_state["analysis_ready"] = False
+
+start_col = st.columns([1,2,1])[1]
+with start_col:
+    start = st.button("Start analysis", type="primary", use_container_width=True)
+if start:
+    st.session_state["analysis_ready"] = True
+    st.session_state["analysis_sig"] = sig
+
+if not st.session_state.get("analysis_ready"):
+    st.info("Adjust settings, then click **Start analysis**.")
     st.stop()
 
 def _cap_z(s: pd.Series, cap: float = 3.0) -> pd.Series:
@@ -158,6 +177,10 @@ st.markdown(
     f'<div class="banner">Peers loaded: <b>{len(panel)}</b> / <b>{target_count}</b> '
     f'&nbsp;|&nbsp; Peer set: <b>{label}</b></div>', unsafe_allow_html=True
 )
+
+with st.expander("View peer list", expanded=False):
+    st.caption(f"Peers shown: {len(panel)}")
+    st.dataframe(pd.DataFrame({"Ticker": list(panel.keys())}), use_container_width=True)
 
 idx = pd.Index(list(panel.keys()))
 out = pd.DataFrame(index=idx)
@@ -397,20 +420,117 @@ for t in show_idx:
                 for b in bullets:
                     st.markdown(f"- {b}")
 
-        # Per-ticker CSV export (unchanged)
-        row = {
+        # Per-ticker CSV export (expanded)
+        def _tval(df: pd.DataFrame, col: str) -> float:
+            if t in df.index and col in df.columns and pd.notna(df.loc[t, col]):
+                return float(df.loc[t, col])
+            return np.nan
+
+        export = {
             "ticker": t,
+            "peer_set": label,
+            "peer_count": int(len(panel)),
             "fundamentals_score": float(table.loc[t, "FUND_score"]),
             "technicals_score":   float(table.loc[t, "TECH_score"]),
             "macro_score":        float(table.loc[t, "MACRO_score"]),
             "composite":          float(table.loc[t, "COMPOSITE"]),
             "score_0_100":        float(table.loc[t, "RATING_0_100"]),
+            "confidence":         float(table.loc[t, "CONFIDENCE"]),
             "recommendation":     str(table.loc[t, "RECO"]),
+            # Fundamentals z-scores
+            "rev_growth_z":        _tval(fdf, "revenueGrowth_z"),
+            "earnings_growth_z":   _tval(fdf, "earningsGrowth_z"),
+            "roe_z":               _tval(fdf, "returnOnEquity_z"),
+            "roa_z":               _tval(fdf, "returnOnAssets_z"),
+            "profit_margin_z":     _tval(fdf, "profitMargins_z"),
+            "gross_margin_z":      _tval(fdf, "grossMargins_z"),
+            "operating_margin_z":  _tval(fdf, "operatingMargins_z"),
+            "ebitda_margin_z":     _tval(fdf, "ebitdaMargins_z"),
+            "pe_z":                _tval(fdf, "trailingPE_z"),
+            "forward_pe_z":        _tval(fdf, "forwardPE_z"),
+            "ev_ebitda_z":          _tval(fdf, "enterpriseToEbitda_z"),
+            "fcf_yield_z":         _tval(fdf, "fcfYield_z"),
+            "debt_equity_z":       _tval(fdf, "debtToEquity_z"),
+            # Technicals (raw)
+            "dma_gap":             _tval(tech, "dma_gap"),
+            "macd_hist":           _tval(tech, "macd_hist"),
+            "rsi_strength":        _tval(tech, "rsi_strength"),
+            "mom12m":              _tval(tech, "mom12m"),
+            # Macro context
+            "vix_last":            float(vix_last) if not np.isnan(vix_last) else np.nan,
+            "vix_gap":             float(vix_gap) if not np.isnan(vix_gap) else np.nan,
+            "gold_3m_return":      float(gold_ret) if not np.isnan(gold_ret) else np.nan,
+            "dxy_3m_return":       float(dxy_ret) if not np.isnan(dxy_ret) else np.nan,
+            "tnx_3m_delta":        float(tnx_delta) if not np.isnan(tnx_delta) else np.nan,
+            "credit_3m_return":    float(credit_ret) if not np.isnan(credit_ret) else np.nan,
         }
-        export_df = pd.DataFrame([row])
-        st.download_button("⬇️ Download this breakdown (CSV)",
-                           data=export_df.to_csv(index=False).encode(),
-                           file_name=f"{t}_breakdown.csv", mime="text/csv", use_container_width=True)
+
+        export_df = pd.DataFrame([export])
+
+        def _section(buf: io.StringIO, title: str, df: pd.DataFrame) -> None:
+            buf.write(f"# {title}\n")
+            df.to_csv(buf, index=True)
+            buf.write("\n\n")
+
+        buf = io.StringIO()
+        _section(buf, "Summary", export_df.set_index("ticker"))
+
+        fund_cols = [c for c in fdf.columns if c.endswith("_z")]
+        if t in fdf.index and fund_cols:
+            _section(buf, "Fundamentals (z-scores)", fdf.loc[[t], fund_cols].T)
+
+        if t in tech.index:
+            trow = tech.loc[[t]].T
+            _section(buf, "Technicals", trow)
+
+        macro_df = pd.DataFrame({
+            "vix_last": [vix_last],
+            "vix_gap": [vix_gap],
+            "gold_3m_return": [gold_ret],
+            "dxy_3m_return": [dxy_ret],
+            "tnx_3m_delta": [tnx_delta],
+            "credit_3m_return": [credit_ret],
+        }).T.rename(columns={0: "value"})
+        _section(buf, "Macro Context", macro_df)
+
+        # Statements & ratios (annual only)
+        stmts = fetch_company_statements(t)
+        compact = build_compact_statements(stmts, freq="annual", take=4)
+        if not compact["income"].empty:
+            _section(buf, "Income Statement (annual)", compact["income"])
+        if not compact["balance"].empty:
+            _section(buf, "Balance Sheet (annual)", compact["balance"])
+        if not compact["cashflow"].empty:
+            _section(buf, "Cash Flow (annual)", compact["cashflow"])
+
+        met = statement_metrics(stmts)
+        ratios = pd.DataFrame({
+            "Revenue (last)": [met.get("revenue")],
+            "Revenue YoY": [met.get("revenue_yoy")],
+            "Revenue CAGR (3y)": [met.get("revenue_cagr3y")],
+            "Gross margin": [met.get("gross_margin")],
+            "Operating margin": [met.get("operating_margin")],
+            "Net margin": [met.get("net_margin")],
+            "FCF margin": [met.get("fcf_margin")],
+            "Current ratio": [met.get("current_ratio")],
+            "Quick ratio": [met.get("quick_ratio")],
+            "Debt/Equity": [met.get("debt_to_equity")],
+            "Interest coverage (EBIT/Int)": [met.get("interest_coverage")],
+            "ROE": [met.get("roe")],
+            "ROA": [met.get("roa")],
+        }).T.rename(columns={0: "value"})
+        _section(buf, "Key Ratios", ratios)
+
+        peers_df = pd.DataFrame({"peer_ticker": list(panel.keys())})
+        _section(buf, "Peers Used", peers_df)
+
+        st.download_button(
+            "⬇️ Download full analysis (CSV)",
+            data=buf.getvalue().encode(),
+            file_name=f"{t}_analysis.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
 
         # Charts (unchanged)
         def draw_stock_charts(series: pd.Series):
@@ -421,23 +541,23 @@ for t in show_idx:
             e20, e50 = ema(series,20), ema(series,50)
             price_df = pd.DataFrame({"Close": series, "EMA20": e20, "EMA50": e50})
             st.line_chart(price_df, use_container_width=True)
-            st.caption("If price is **above EMA50/EMA20**, trend bias is positive; **below** suggests a headwind.")
+            st.caption("EMA = exponential moving average. Price above EMA50/EMA20 implies uptrend bias; below implies headwind.")
 
             st.subheader("📉 MACD")
             line, sig, hist = macd(series)
             st.line_chart(pd.DataFrame({"MACD line": line, "Signal": sig}), use_container_width=True)
             st.bar_chart(pd.DataFrame({"Histogram": hist}), use_container_width=True)
-            st.caption("Rising histogram above zero → momentum building; falling below zero → fading.")
+            st.caption("MACD compares two EMAs. Histogram > 0 suggests momentum building; < 0 suggests fading.")
 
             st.subheader("🔁 RSI (14)")
             st.line_chart(pd.DataFrame({"RSI(14)": rsi(series)}), use_container_width=True)
-            st.caption(">70 = overbought • <30 = oversold • around 50 = neutral trend strength.")
+            st.caption("RSI measures trend strength: >70 overbought, <30 oversold, ~50 neutral.")
 
             st.subheader("🚀 12-month momentum")
             if len(series) > 252:
                 mom12 = series/series.shift(253)-1.0
                 st.line_chart(pd.DataFrame({"12m momentum": mom12}), use_container_width=True)
-                st.caption("Positive vs one year ago → outperformance; negative → underperformance.")
+                st.caption("12m momentum compares today to ~1 year ago; positive implies outperformance.")
             else:
                 st.info("Need > 1 year of data to show the 12-month momentum line.")
 

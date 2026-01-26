@@ -41,18 +41,22 @@ st.markdown(
 
     <script>
     (function(){
-      // Robustly rename the first sidebar nav item from "app" to "Home"
-      function renameFirst(){
+      // Rename "app" -> "Home" in sidebar nav
+      function renameNav(){
         try{
           const nav = document.querySelector('[data-testid="stSidebarNav"]');
           if(!nav) return;
-          const first = nav.querySelector('ul li:first-child a p');
-          if(first && first.textContent.trim().toLowerCase()==='app'){ first.textContent = 'Home'; }
+          const nodes = nav.querySelectorAll('a p, a span');
+          nodes.forEach(n=>{
+            if(n.textContent && n.textContent.trim().toLowerCase()==='app'){
+              n.textContent = 'Home';
+            }
+          });
         }catch(e){}
       }
-      const obs = new MutationObserver(renameFirst);
+      const obs = new MutationObserver(renameNav);
       obs.observe(document.body,{childList:true,subtree:true});
-      renameFirst();
+      renameNav();
     })();
     </script>
     """,
