@@ -165,13 +165,37 @@ if out.empty:
     st.info("Add at least one holding to run the rating.")
     st.stop()
 
+sig = (
+    tuple(out["ticker"].tolist()),
+    total if "total" in locals() else None,
+    sync_mode,
+)
+if st.session_state.get("portfolio_sig") != sig:
+    st.session_state["portfolio_ready"] = False
+
+start_col = st.columns([1,2,1])[1]
+with start_col:
+    start = st.button("Start portfolio analysis", type="primary", use_container_width=True)
+if start:
+    st.session_state["portfolio_ready"] = True
+    st.session_state["portfolio_sig"] = sig
+
+if not st.session_state.get("portfolio_ready"):
+    st.info("Review holdings, then click **Start portfolio analysis**.")
+    st.stop()
+
 with st.status("Crunching the numbers…", expanded=True) as status:
     prog = st.progress(0)
+    pct = st.empty()
+    msg = st.empty()
     tickers = out["ticker"].tolist()
+    msg.info("Step 1/4: building peer universe.")
     universe, label = build_universe(tickers, "Auto by index membership", 180, "")
     target_count = len(universe)
     prog.progress(8)
+    pct.markdown("**Progress: 8%**")
 
+    msg.info("Step 2/4: downloading price history.")
     prices, ok = fetch_prices_chunked_with_fallback(
         universe, period="1y", interval="1d",
         chunk=25, retries=3, sleep_between=0.35, singles_pause=0.20
@@ -179,14 +203,18 @@ with st.status("Crunching the numbers…", expanded=True) as status:
     if prices.empty:
         st.error("No prices fetched."); st.stop()
     prog.progress(40)
+    pct.markdown("**Progress: 40%**")
 
     panel_all = {t: prices[t].dropna() for t in prices.columns if t in prices.columns and prices[t].dropna().size>0}
+    msg.info("Step 3/4: computing technical signals.")
     tech_all = technical_scores(panel_all)
     for col in ["dma_gap","macd_hist","rsi_strength","mom12m"]:
         if col in tech_all.columns: tech_all[f"{col}_z"] = _cap_z(zscore_series(tech_all[col]))
     TECH_score_all = tech_all[[c for c in ["dma_gap_z","macd_hist_z","rsi_strength_z","mom12m_z"] if c in tech_all.columns]].mean(axis=1)
     prog.progress(65)
+    pct.markdown("**Progress: 65%**")
 
+    msg.info("Step 4/4: computing fundamentals + macro.")
     fund_raw_all = fetch_fundamentals_simple(list(panel_all.keys()))
     core_fund = [
         "revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
@@ -213,6 +241,7 @@ with st.status("Crunching the numbers…", expanded=True) as status:
     credit_series = fetch_credit_ratio_series(period="6mo", interval="1d")
     MACRO = macro_from_signals(vix_series, gold_series, dxy_series, tnx_series, credit_series)["macro"]
     prog.progress(100)
+    pct.markdown("**Progress: 100%**")
     status.update(label="Done!", state="complete")
 
 st.markdown(
@@ -291,6 +320,18 @@ a.metric("Portfolio Score (0–100)", f"{port_score:.1f}")
 b.metric("Signal (weighted composite)", f"{port_signal:.3f}")
 c.metric("Macro (Multi-signal)", f"{MACRO:.3f}")
 d.metric("Diversification", f"{DIV:.3f}")
+st.caption(
+    "Score is a weighted blend of fundamentals, technicals, and macro. "
+    "Diversification rewards lower concentration and lower correlations."
+)
+
+st.markdown("### Allocation Snapshot")
+weights_named = pd.Series(list(weights.values), index=tickers_shown)
+alloc = pd.DataFrame({
+    "Ticker": tickers_shown,
+    "Weight %": (weights_named.values * 100.0),
+}).sort_values("Weight %", ascending=False)
+st.dataframe(alloc.round(2), use_container_width=True)
 
 with st.expander("Why this portfolio rating?"):
     show = per_name.rename(columns={"weight":"Weight","FUND_score":"Fundamentals",

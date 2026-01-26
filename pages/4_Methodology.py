@@ -85,6 +85,12 @@ st.table(
         "Score": [0.55, 0.30, 0.40],
     }
 )
+st.markdown(
+    "**Interpretation:**  \n"
+    "- Fundamentals are strong because growth and profitability z‑scores are positive, even though valuation is a headwind.  \n"
+    "- Technicals are mildly positive (uptrend, but momentum not extreme).  \n"
+    "- Macro is neutral‑positive (risk backdrop not restrictive)."
+)
 
 st.markdown("**Step D — Composite score:**")
 st.code("Composite = 0.50×0.55 + 0.45×0.30 + 0.05×0.40 = 0.43")
@@ -159,6 +165,13 @@ st.markdown(
     "If a factor group is missing for a ticker, weights are re‑normalized over the available groups."
 )
 
+st.markdown("## 4b) Portfolio Score (Weighted Holdings)")
+st.markdown(
+    "For a portfolio, each holding’s composite score is weighted by its portfolio allocation:  \n"
+    "`PortfolioSignal = Σ(Weight_i × Composite_i)`  \n"
+    "We then blend a small diversification bonus to reward lower concentration and lower correlations."
+)
+
 st.markdown("## 5) Rating & Recommendation")
 st.markdown(
     "We rank the composite score among peers into a percentile score:  \n"
@@ -178,6 +191,12 @@ st.markdown(
     "- Fundamentals coverage (% of factor z‑scores available)  \n"
     "- Technicals coverage (% of factor z‑scores available)"
 )
+st.markdown(
+    "**What coverage means:**  \n"
+    "- **Fundamentals coverage** = how many fundamental factors were available for the ticker (e.g., ROE, margins, FCF).  \n"
+    "- **Technicals coverage** = how many technical factors were computed from price data (EMA gap, MACD, RSI, momentum).  \n"
+    "Missing data reduces coverage and lowers confidence."
+)
 
 st.markdown("## 📚 Factor Glossary (Short)")
 st.markdown(
@@ -194,3 +213,20 @@ st.markdown(
     "- Data comes from public sources (yfinance) and can be delayed or incomplete.  \n"
     "- This tool is educational and not investment advice."
 )
+
+st.markdown("## 🎯 How to Read Scores (Quick Legend)")
+legend = pd.DataFrame(
+    {
+        "Score Range": ["80–100", "60–79", "40–59", "20–39", "0–19"],
+        "Label": ["Strong Buy", "Buy", "Hold", "Sell", "Strong Sell"],
+        "Color": ["#2ecc71", "#8bc34a", "#f1c40f", "#f39c12", "#e74c3c"],
+        "Meaning": [
+            "Top of peers; strongest signals across factors",
+            "Above‑average vs peers",
+            "Around peer average",
+            "Below‑average vs peers",
+            "Bottom of peers; weakest signals",
+        ],
+    }
+)
+st.dataframe(legend, use_container_width=True)
