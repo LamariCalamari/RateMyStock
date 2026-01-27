@@ -246,12 +246,12 @@ weights = {"FUND_score": wf, "TECH_score": wt, "MACRO_score": wm}
 out["COMPOSITE"] = out.apply(_composite_row, axis=1, weights=weights)
 ratings = percentile_rank(out["COMPOSITE"].dropna())
 out["RATING_0_100"] = ratings.reindex(out.index)
-    out["RECO"] = out["RATING_0_100"].apply(score_label)
+out["RECO"] = out["RATING_0_100"].apply(score_label)
 
-    tech_cols = [c for c in tech.columns if c.endswith("_z")]
-    fund_cols = [c for c in fdf.columns if c.endswith("_z")]
-    peer_factor = min(len(out["COMPOSITE"].dropna()) / max(target_count, 1), 1.0)
-    cw = SCORING_CONFIG["confidence_weights"]
+tech_cols = [c for c in tech.columns if c.endswith("_z")]
+fund_cols = [c for c in fdf.columns if c.endswith("_z")]
+peer_factor = min(len(out["COMPOSITE"].dropna()) / max(target_count, 1), 1.0)
+cw = SCORING_CONFIG["confidence_weights"]
 out["CONFIDENCE"] = [
     100.0 * (cw["peer"]*peer_factor + cw["fund"]*_coverage(fdf, t, fund_cols) + cw["tech"]*_coverage(tech, t, tech_cols))
     for t in out.index
