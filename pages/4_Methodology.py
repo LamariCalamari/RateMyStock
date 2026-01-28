@@ -187,6 +187,25 @@ st.markdown(
     "- **Correlation:** penalizes highly correlated holdings  \n"
     "Final diversification score = `0.5·Sector + 0.3·Correlation + 0.2·Concentration`"
 )
+st.markdown(
+    "**Risk contribution:** Each holding’s share of portfolio volatility, derived from the covariance matrix. "
+    "This identifies which positions drive risk the most."
+)
+st.markdown(
+    "**Risk metrics:**  \n"
+    "- **Volatility (ann.)** = std(daily returns) × √252  \n"
+    "- **Max drawdown** = worst peak‑to‑trough decline  \n"
+    "- **Sharpe** = mean return / volatility  \n"
+    "- **Sortino** = mean return / downside volatility  \n"
+    "- **VaR/CVaR** = tail loss estimates (worst 5% of days)"
+)
+st.markdown(
+    "**Benchmarking (SPY):**  \n"
+    "- **Beta** = covariance(portfolio, benchmark) / variance(benchmark)  \n"
+    "- **Alpha** = excess return after adjusting for beta  \n"
+    "- **Tracking error** = std(portfolio − benchmark)  \n"
+    "- **Information ratio** = active return / tracking error"
+)
 
 st.markdown("## 7) Rating & Recommendation")
 st.markdown(

@@ -86,6 +86,29 @@ def _coverage(df: pd.DataFrame, tickers: list[str], cols: list[str]) -> float:
         return 0.0
     return float(df.loc[valid, cols].notna().mean().mean())
 
+FACTOR_LABELS = {
+    "revenueGrowth_z": "Revenue growth",
+    "earningsGrowth_z": "Earnings growth",
+    "returnOnEquity_z": "ROE",
+    "returnOnAssets_z": "ROA",
+    "profitMargins_z": "Profit margin",
+    "grossMargins_z": "Gross margin",
+    "operatingMargins_z": "Operating margin",
+    "ebitdaMargins_z": "EBITDA margin",
+    "trailingPE_z": "P/E (lower is better)",
+    "forwardPE_z": "Forward P/E (lower is better)",
+    "enterpriseToEbitda_z": "EV/EBITDA (lower is better)",
+    "fcfYield_z": "FCF yield",
+    "debtToEquity_z": "Debt/Equity (lower is better)",
+    "dma_gap_z": "Price vs EMA50",
+    "macd_hist_z": "MACD momentum",
+    "rsi_strength_z": "RSI strength",
+    "mom12m_z": "12m momentum",
+}
+
+def _pretty_factor(col: str) -> str:
+    return FACTOR_LABELS.get(col, col.replace("_z", "").replace("_", " ").title())
+
 # Default grid
 if st.session_state.get("grid_df") is None:
     st.session_state["grid_df"] = pd.DataFrame({
@@ -372,6 +395,31 @@ cw = SCORING_CONFIG["confidence_weights"]
 port_conf = 100.0 * (cw["peer"]*peer_factor + cw["fund"]*_coverage(fdf_all, tickers_shown, fund_cols) + cw["tech"]*_coverage(tech_all, tickers_shown, tech_cols))
 st.caption(f"Confidence: {port_conf:.0f}/100 based on data coverage and peer sample size.")
 
+with st.expander("How to read this portfolio analysis"):
+    st.markdown(
+        "- **Portfolio Score** blends Fundamentals, Technicals, Macro, plus a small Diversification bonus.  \n"
+        "- **Signal (weighted composite)** summarizes peer‑relative strength (>0 means above peer average).  \n"
+        "- **Macro** reflects the broader risk regime (VIX, USD, rates, credit, gold).  \n"
+        "- **Diversification** rewards balanced sector mix, low concentration, and lower correlations.  \n"
+        "- **Confidence** depends on peer size + data coverage; lower confidence means interpret cautiously."
+    )
+
+st.markdown("### Signal Decomposition")
+fund_contrib = float((per_name["FUND_score"] * per_name["weight"]).sum())
+tech_contrib = float((per_name["TECH_score"] * per_name["weight"]).sum())
+macro_contrib = float((per_name["MACRO_score"] * per_name["weight"]).sum())
+div_bonus = float(DIV * 0.05)
+st.dataframe(
+    pd.DataFrame(
+        {
+            "Component": ["Fundamentals", "Technicals", "Macro", "Diversification bonus"],
+            "Contribution": [fund_contrib, tech_contrib, macro_contrib, div_bonus],
+        }
+    ).set_index("Component").round(4),
+    use_container_width=True,
+)
+st.caption("Contributions show how each component lifts or drags the portfolio signal.")
+
 
 st.markdown("### Allocation Snapshot")
 weights_named = pd.Series(list(weights.values), index=tickers_shown)
@@ -386,6 +434,56 @@ sector_series = pd.Series({t: fetch_sector(t) for t in tickers_shown}).fillna("U
 sector_mix = weights_named.groupby(sector_series).sum().sort_values(ascending=False) * 100.0
 st.bar_chart(pd.DataFrame({"Allocation %": sector_mix}), use_container_width=True)
 st.caption("Sector mix highlights concentration risk. High single‑sector exposure increases risk.")
+
+st.markdown("### Factor Tilt (Portfolio‑Weighted)")
+tilt_notes = []
+if not fdf_all.empty:
+    fcols = [c for c in fdf_all.columns if c.endswith("_z")]
+    f_hold = fdf_all.reindex(tickers_shown)[fcols].dropna(how="all")
+    if not f_hold.empty:
+        w = weights_named.reindex(f_hold.index).fillna(0.0)
+        f_tilt = (f_hold.mul(w, axis=0)).sum() / (w.sum() or 1.0)
+        pos = f_tilt.sort_values(ascending=False).head(3)
+        neg = f_tilt.sort_values(ascending=True).head(3)
+        tilt_notes.append("**Top positive tilts:**")
+        for k, v in pos.items():
+            tilt_notes.append(f"- {_pretty_factor(k)}: **{v:+.2f}z**")
+        tilt_notes.append("**Top negative tilts:**")
+        for k, v in neg.items():
+            tilt_notes.append(f"- {_pretty_factor(k)}: **{v:+.2f}z**")
+if tilt_notes:
+    st.markdown("\n".join(tilt_notes))
+else:
+    st.caption("Not enough fundamentals data to compute factor tilts.")
+
+st.markdown("### Risk Contribution")
+if ret.shape[1] >= 2:
+    cov = ret.cov() * 252.0
+    w = weights_named.reindex(cov.index).fillna(0.0).values
+    w = w / (w.sum() or 1.0)
+    port_var = float(w.T @ cov.values @ w)
+    if port_var > 0:
+        mrc = cov.values @ w
+        rc = w * mrc / port_var
+        rc_df = pd.DataFrame({
+            "Ticker": cov.index,
+            "Risk Contribution %": rc * 100.0,
+        }).sort_values("Risk Contribution %", ascending=False)
+        st.dataframe(rc_df.round(2), use_container_width=True)
+        st.caption("Risk contribution shows which holdings drive portfolio volatility the most.")
+    else:
+        st.caption("Risk contribution unavailable (insufficient variance).")
+else:
+    st.caption("Risk contribution requires at least two holdings with data.")
+
+st.markdown("### Holdings Scorecard")
+hold_scores = out_all.reindex(tickers_shown)[["COMPOSITE","RATING_0_100"]].copy()
+hold_scores["Recommendation"] = hold_scores["RATING_0_100"].apply(score_label)
+hold_scores["Weight %"] = (weights_named.reindex(tickers_shown).values * 100.0)
+hold_scores = hold_scores.reset_index().rename(columns={"index": "Ticker"})
+hold_scores = hold_scores.sort_values("Weight %", ascending=False)
+st.dataframe(hold_scores.round(3), use_container_width=True)
+st.caption("Holdings are ranked by weight; ratings are relative to the peer set.")
 
 st.markdown("### Top Contributors (Weight × Score)")
 per_name_sorted = per_name.copy()
@@ -420,14 +518,69 @@ w_vec = weights_named.reindex(px_held.columns).fillna(0).values
 port_r = (r * w_vec).sum(axis=1)
 eq = (1+port_r).cumprod()
 mdd = float((eq / eq.cummax() - 1).min())
-vol_ann = float(port_r.std() * np.sqrt(252))
-sharpe = float((port_r.mean() / (port_r.std() or 1e-9)) * np.sqrt(252))
+vol_ann = float(port_r.std() * np.sqrt(252)) if len(port_r) else np.nan
+sharpe = float((port_r.mean() / (port_r.std() or 1e-9)) * np.sqrt(252)) if len(port_r) else np.nan
+downside = port_r[port_r < 0]
+down_std = float(downside.std()) if len(downside) else np.nan
+sortino = float((port_r.mean() / (down_std or 1e-9)) * np.sqrt(252)) if len(port_r) else np.nan
+var_95 = float(np.percentile(port_r, 5)) if len(port_r) else np.nan
+cvar_95 = float(port_r[port_r <= var_95].mean()) if len(port_r) else np.nan
 st.markdown("### Risk Snapshot")
-r1, r2, r3 = st.columns(3)
+r1, r2, r3, r4 = st.columns(4)
 r1.metric("Max Drawdown", f"{mdd*100:.1f}%")
-r2.metric("Volatility (ann.)", f"{vol_ann*100:.1f}%")
-r3.metric("Sharpe (ann.)", f"{sharpe:.2f}")
-st.caption("Max drawdown = worst peak‑to‑trough loss; volatility = typical fluctuation; Sharpe = risk‑adjusted return.")
+r2.metric("Volatility (ann.)", f"{vol_ann*100:.1f}%" if not np.isnan(vol_ann) else "N/A")
+r3.metric("Sharpe (ann.)", f"{sharpe:.2f}" if not np.isnan(sharpe) else "N/A")
+r4.metric("Sortino (ann.)", f"{sortino:.2f}" if not np.isnan(sortino) else "N/A")
+st.caption(
+    "Max drawdown = worst peak‑to‑trough loss; volatility = typical fluctuation; "
+    "Sharpe = risk‑adjusted return; Sortino penalizes only downside volatility."
+)
+
+st.markdown("### Tail Risk")
+t1, t2 = st.columns(2)
+t1.metric("VaR 95% (daily)", f"{var_95*100:.2f}%" if not np.isnan(var_95) else "N/A")
+t2.metric("CVaR 95% (daily)", f"{cvar_95*100:.2f}%" if not np.isnan(cvar_95) else "N/A")
+st.caption("VaR/CVaR estimate potential daily loss in the worst 5% of days.")
+
+with st.expander("How to interpret risk metrics"):
+    st.markdown(
+        "- **Volatility** = typical fluctuation of returns; higher = bumpier ride.  \n"
+        "- **Max Drawdown** = worst peak‑to‑trough loss; gauges pain in bad regimes.  \n"
+        "- **Sharpe** = return per unit of total risk; higher is better.  \n"
+        "- **Sortino** = return per unit of downside risk; useful if you care about losses more than volatility.  \n"
+        "- **VaR/CVaR** = tail loss estimates; CVaR is the average loss in the worst 5% of days."
+    )
+
+st.markdown("### Benchmark Comparison (SPY)")
+bench_prices, _ = fetch_prices_chunked_with_fallback(["SPY"], period="1y", interval="1d", chunk=1, retries=2, sleep_between=0.2, singles_pause=0.2)
+if not bench_prices.empty and "SPY" in bench_prices.columns:
+    bench_r = bench_prices["SPY"].pct_change().dropna()
+    aligned = port_r.align(bench_r, join="inner")
+    if not aligned[0].empty and not aligned[1].empty:
+        pr, br = aligned
+        beta = float(np.cov(pr, br)[0,1] / (np.var(br) or 1e-9))
+        alpha = float((pr.mean() - beta*br.mean()) * 252)
+        tracking_err = float((pr - br).std() * np.sqrt(252))
+        info_ratio = float(((pr.mean() - br.mean()) / (tracking_err or 1e-9)) * np.sqrt(252))
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Beta vs SPY", f"{beta:.2f}")
+        c2.metric("Alpha (ann.)", f"{alpha*100:.2f}%")
+        c3.metric("Tracking Error", f"{tracking_err*100:.2f}%")
+        c4.metric("Info Ratio", f"{info_ratio:.2f}")
+
+        bench_eq = (1 + br).cumprod()
+        st.line_chart(pd.DataFrame({"Portfolio": eq.reindex(bench_eq.index), "SPY": bench_eq}), use_container_width=True)
+        st.caption("Benchmark chart compares cumulative performance vs SPY over the same period.")
+        st.markdown(
+            "- **Beta** = sensitivity to the benchmark.  \n"
+            "- **Alpha** = return unexplained by benchmark exposure.  \n"
+            "- **Tracking Error** = variability of active returns.  \n"
+            "- **Information Ratio** = active return per unit of tracking error."
+        )
+    else:
+        st.caption("Benchmark data unavailable for comparison.")
+else:
+    st.caption("Benchmark data unavailable for comparison.")
 
 st.markdown("### Executive Summary")
 summary_bits = [

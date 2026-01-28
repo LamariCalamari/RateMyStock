@@ -9,7 +9,7 @@ from app_utils import (
     technical_scores, fetch_fundamentals_simple, zscore_series,
     fetch_vix_series, fetch_gold_series, fetch_dxy_series, fetch_tnx_series,
     fetch_credit_ratio_series, macro_from_signals, fetch_sector,
-    SCORING_CONFIG, score_label
+    SCORING_CONFIG, score_label, build_universe
 )
 
 st.set_page_config(page_title="Portfolio Tracker", layout="wide")
@@ -255,15 +255,156 @@ live_score = float(np.clip((live_signal+1)/2, 0, 1)*100)
 
 st.markdown("### 🔮 Live ‘Rate My Portfolio’ Score")
 st.metric("Portfolio Score (0–100)", f"{live_score:.1f}")
-st.caption(f"Interpretation: **{score_label(live_score)}**.")
-def _score_label(score: float) -> str:
-    if score >= 80: return "Strong Buy"
-    if score >= 60: return "Buy"
-    if score >= 40: return "Hold"
-    if score >= 20: return "Sell"
-    return "Strong Sell"
-
 st.caption(
-    f"Interpretation: **{_score_label(live_score)}**. "
+    f"Interpretation: **{score_label(live_score)}**. "
     "80+ strong, 60–79 buy, 40–59 hold, 20–39 sell, <20 strong sell."
 )
+
+st.markdown("### Score Bands")
+def _band(score: float) -> int:
+    if np.isnan(score): return -1
+    if score >= 80: return 4
+    if score >= 60: return 3
+    if score >= 40: return 2
+    if score >= 20: return 1
+    return 0
+
+active = _band(live_score)
+bands = [
+    ("0–19", "#e74c3c"),
+    ("20–39", "#f39c12"),
+    ("40–59", "#f1c40f"),
+    ("60–79", "#8bc34a"),
+    ("80–100", "#2ecc71"),
+]
+cells = []
+for i, (label, color) in enumerate(bands):
+    ring = "box-shadow:0 0 0 2px #fff inset;" if i == active else ""
+    text = "color:#111;" if i >= 2 else ""
+    cells.append(
+        f"<div style='flex:1;background:{color};padding:8px;border-radius:6px;text-align:center;{text}{ring}'>"
+        f"{label}</div>"
+    )
+st.markdown(f"<div style='display:flex;gap:6px;'>{''.join(cells)}</div>", unsafe_allow_html=True)
+
+with st.expander("How to read this tracker score"):
+    st.markdown(
+        "- **Fundamentals** and **Technicals** are peer‑relative z‑scores. Positive = stronger vs peers.  \n"
+        "- **Macro** is a regime overlay (VIX, USD, rates, credit, gold) and is the same for all holdings.  \n"
+        "- This tracker score is a live snapshot using current weights; use **Rate My Portfolio** for deeper analysis."
+    )
+
+FACTOR_LABELS = {
+    "revenueGrowth_z": "Revenue growth",
+    "earningsGrowth_z": "Earnings growth",
+    "returnOnEquity_z": "ROE",
+    "returnOnAssets_z": "ROA",
+    "profitMargins_z": "Profit margin",
+    "grossMargins_z": "Gross margin",
+    "operatingMargins_z": "Operating margin",
+    "ebitdaMargins_z": "EBITDA margin",
+    "fcfYield_z": "FCF yield",
+    "trailingPE_z": "P/E (lower is better)",
+    "forwardPE_z": "Forward P/E (lower is better)",
+    "enterpriseToEbitda_z": "EV/EBITDA (lower is better)",
+    "debtToEquity_z": "Debt/Equity (lower is better)",
+    "dma_gap_z": "Price vs EMA50",
+    "macd_hist_z": "MACD momentum",
+    "rsi_strength_z": "RSI strength",
+    "mom12m_z": "12m momentum",
+}
+
+def _weighted_mean_z(df: pd.DataFrame, weights: pd.Series) -> pd.Series:
+    if df.empty:
+        return pd.Series(dtype=float)
+    out = {}
+    for col in [c for c in df.columns if c.endswith("_z")]:
+        series = df[col].reindex(weights.index)
+        mask = series.notna() & weights.notna()
+        if mask.any():
+            out[col] = float(np.average(series[mask], weights=weights[mask]))
+    return pd.Series(out).sort_values()
+
+weak_factors = pd.Series(dtype=float)
+if not weights.empty:
+    weights_norm = weights / (weights.sum() or 1.0)
+    fund_weak = _weighted_mean_z(fdf_all.reindex(tickers), weights_norm)
+    tech_weak = _weighted_mean_z(tech_all.reindex(tickers), weights_norm)
+    weak_factors = pd.concat([fund_weak, tech_weak]).sort_values().head(3)
+
+st.markdown("### Suggested Additions (factor‑based)")
+if weak_factors.empty:
+    st.caption("Not enough data to generate factor‑based ideas. Add more holdings or try again later.")
+else:
+    weak_labels = [FACTOR_LABELS.get(k, k.replace("_z", "")) for k in weak_factors.index]
+    st.caption("Weakest factors: " + ", ".join(weak_labels) + ".")
+
+    rec_sig = (tuple(sorted(tickers)), tuple(weak_factors.index))
+    if st.session_state.get("rec_sig") != rec_sig:
+        st.session_state.pop("rec_df", None)
+        st.session_state["rec_sig"] = rec_sig
+
+    if st.button("Generate recommendations", type="secondary", use_container_width=True):
+        with st.status("Scanning peers for factor‑based ideas…", expanded=True) as status:
+            prog = st.progress(0)
+            msg = st.empty()
+            msg.info("Step 1/3: building candidate universe.")
+            universe, label = build_universe(tickers, "Auto (industry → sector → index)", 120, "")
+            candidates = [t for t in universe if t not in tickers][:60]
+            prog.progress(20)
+
+            msg.info("Step 2/3: loading candidate price history.")
+            prices_c, ok = fetch_prices_chunked_with_fallback(candidates, period="1y", interval="1d", chunk=20, retries=2, sleep_between=0.4, singles_pause=0.4)
+            panel_c = {t: prices_c[t].dropna() for t in ok if t in prices_c.columns and prices_c[t].dropna().size > 0}
+            if not panel_c:
+                st.warning("No candidate prices available.")
+            prog.progress(60)
+
+            msg.info("Step 3/3: scoring candidates on weak factors.")
+            tech_c = technical_scores(panel_c)
+            for col in ["dma_gap","macd_hist","rsi_strength","mom12m"]:
+                if col in tech_c.columns:
+                    tech_c[f"{col}_z"] = _cap_z(zscore_series(tech_c[col]))
+
+            fund_c = fetch_fundamentals_simple(list(panel_c.keys()))
+            core_fund = [
+                "revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
+                "profitMargins","grossMargins","operatingMargins","ebitdaMargins","fcfYield",
+                "trailingPE","forwardPE","enterpriseToEbitda","debtToEquity"
+            ]
+            core_present = [c for c in core_fund if c in fund_c.columns]
+            if core_present:
+                min_fund_cols = SCORING_CONFIG["min_fund_cols"]
+                fund_c = fund_c[fund_c[core_present].notna().sum(axis=1) >= min_fund_cols]
+
+            fdf_c = pd.DataFrame(index=fund_c.index)
+            for col in ["revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
+                        "profitMargins","grossMargins","operatingMargins","ebitdaMargins","fcfYield"]:
+                if col in fund_c.columns: fdf_c[f"{col}_z"]=_cap_z(zscore_series(fund_c[col]))
+            for col in ["trailingPE","forwardPE","enterpriseToEbitda","debtToEquity"]:
+                if col in fund_c.columns: fdf_c[f"{col}_z"]=_cap_z(zscore_series(-fund_c[col]))
+
+            cand = pd.concat([fdf_c, tech_c[[c for c in tech_c.columns if c.endswith("_z")]]], axis=1)
+            use_cols = [c for c in weak_factors.index if c in cand.columns]
+            if use_cols:
+                cand["improve_score"] = cand[use_cols].mean(axis=1)
+                cand = cand.sort_values("improve_score", ascending=False).head(8)
+                cand["Sector"] = [fetch_sector(t) for t in cand.index]
+                why = []
+                for t in cand.index:
+                    top = cand.loc[t, use_cols].sort_values(ascending=False).head(2)
+                    why.append(", ".join([FACTOR_LABELS.get(k, k) for k in top.index]))
+                cand["Why"] = why
+                st.session_state["rec_df"] = cand
+            else:
+                st.warning("Not enough candidate data to score weak factors.")
+            prog.progress(100)
+            status.update(label="Done!", state="complete")
+
+    rec_df = st.session_state.get("rec_df")
+    if isinstance(rec_df, pd.DataFrame) and not rec_df.empty:
+        st.dataframe(rec_df[["Sector","improve_score","Why"]].round(3), use_container_width=True)
+        st.caption(
+            "Ideas are ranked by strength on your weakest factors. "
+            "Use as a starting point, not investment advice."
+        )

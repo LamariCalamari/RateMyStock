@@ -258,10 +258,25 @@ out["CONFIDENCE"] = [
 ]
 
 overall_conf = float(out["CONFIDENCE"].mean()) if not out["CONFIDENCE"].empty else 0.0
-m1, m2, m3 = st.columns(3)
-m1.metric("Peers loaded", f"{len(panel)}/{target_count}")
-m2.metric("Peer set", label)
-m3.metric("Avg confidence", f"{overall_conf:.0f}/100")
+st.markdown(
+    f"""
+    <div style="display:grid;grid-template-columns:1fr 1.4fr 1fr;gap:12px;margin:8px 0 4px;">
+      <div style="background:#151920;border:1px solid #2c3239;border-radius:10px;padding:14px 16px;text-align:center;">
+        <div style="color:#9aa0a6;font-size:.9rem;">Peers loaded</div>
+        <div style="font-size:2rem;font-weight:800;">{len(panel)}/{target_count}</div>
+      </div>
+      <div style="background:#151920;border:1px solid #2c3239;border-radius:10px;padding:14px 16px;text-align:center;">
+        <div style="color:#9aa0a6;font-size:.9rem;">Peer set</div>
+        <div style="font-size:1.4rem;font-weight:700;white-space:normal;">{label}</div>
+      </div>
+      <div style="background:#151920;border:1px solid #2c3239;border-radius:10px;padding:14px 16px;text-align:center;">
+        <div style="color:#9aa0a6;font-size:.9rem;">Avg confidence</div>
+        <div style="font-size:2rem;font-weight:800;">{overall_conf:.0f}/100</div>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 st.markdown("### Score Bands")
 def _band(score: float) -> int:
@@ -292,6 +307,15 @@ for i, (label, color) in enumerate(bands):
 st.markdown(f"<div style='display:flex;gap:6px;'>{''.join(cells)}</div>", unsafe_allow_html=True)
 if not np.isnan(avg_score):
     st.caption(f"Average score band highlighted (avg score {avg_score:.1f}).")
+
+with st.expander("How to read this analysis"):
+    st.markdown(
+        "- **Fundamentals** are peer‑relative **z‑scores**. Positive = stronger than peers, negative = weaker.  \n"
+        "- **Valuation ratios** (P/E, EV/EBITDA, Debt/Equity) are inverted, so **lower is better**.  \n"
+        "- **Technicals** capture trend + momentum (EMA gap, MACD, RSI, 12‑month momentum).  \n"
+        "- **Macro (Multi‑signal)** blends VIX, USD, rates, credit, and gold into a risk‑on/risk‑off context.  \n"
+        "- **Confidence** reflects peer sample size + data coverage; lower confidence means interpret with caution."
+    )
 
 # 5Y momentum for SHOWN tickers only (quietly)
 show_idx = [t for t in user_tickers if t in out.index]
@@ -666,6 +690,34 @@ for t in show_idx:
             if series is None or series.empty:
                 st.info("Not enough history to show charts.")
                 return
+            # Risk snapshot
+            r = series.pct_change().dropna()
+            if not r.empty:
+                vol_ann = float(r.std() * np.sqrt(252))
+                eq = (1 + r).cumprod()
+                mdd = float((eq / eq.cummax() - 1).min())
+                sharpe = float((r.mean() / (r.std() or 1e-9)) * np.sqrt(252))
+                downside = r[r < 0]
+                down_std = float(downside.std()) if len(downside) else np.nan
+                sortino = float((r.mean() / (down_std or 1e-9)) * np.sqrt(252)) if not np.isnan(down_std) else np.nan
+                var_95 = float(np.percentile(r, 5)) if len(r) else np.nan
+                cvar_95 = float(r[r <= var_95].mean()) if len(r) else np.nan
+
+                s1, s2, s3, s4 = st.columns(4)
+                s1.metric("Volatility (ann.)", f"{vol_ann*100:.1f}%")
+                s2.metric("Max Drawdown", f"{mdd*100:.1f}%")
+                s3.metric("Sharpe (ann.)", f"{sharpe:.2f}")
+                s4.metric("Sortino (ann.)", f"{sortino:.2f}" if not np.isnan(sortino) else "N/A")
+                st.caption(
+                    "Volatility = typical fluctuation; max drawdown = worst peak‑to‑trough loss. "
+                    "Sharpe uses total risk; Sortino penalizes only downside volatility."
+                )
+
+                st.markdown("##### Tail Risk")
+                t1, t2 = st.columns(2)
+                t1.metric("VaR 95% (daily)", f"{var_95*100:.2f}%" if not np.isnan(var_95) else "N/A")
+                t2.metric("CVaR 95% (daily)", f"{cvar_95*100:.2f}%" if not np.isnan(cvar_95) else "N/A")
+                st.caption("VaR/CVaR estimate potential daily loss in the worst 5% of days.")
             st.subheader("📈 Price & EMAs")
             e20, e50 = ema(series,20), ema(series,50)
             price_df = pd.DataFrame({"Close": series, "EMA20": e20, "EMA50": e50})
