@@ -13,6 +13,7 @@ from app_utils import (
 st.set_page_config(page_title="Rate My Portfolio", layout="wide")
 inject_css()
 brand_header("Rate My Portfolio")
+st.page_link("pages/5_Stock_Battle.py", label="Compare holdings in Stock Battle")
 
 CURRENCY_MAP = {"$":"USD","€":"EUR","£":"GBP","CHF":"CHF","C$":"CAD","A$":"AUD","¥":"JPY"}
 def _safe_num(x): return pd.to_numeric(x, errors="coerce")

@@ -22,6 +22,7 @@ from app_utils import (
 st.set_page_config(page_title="Rate My — Stock", layout="wide")
 inject_css()
 brand_header("Rate My Stock")
+st.page_link("pages/5_Stock_Battle.py", label="Compare stocks in Stock Battle")
 
 # -------------------- Inputs --------------------
 c_in_left, c_in_mid, c_in_right = st.columns([1,2,1])
