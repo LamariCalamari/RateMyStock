@@ -670,6 +670,52 @@ if not tech_means.empty:
 
 if factor_actions:
     st.markdown("\n".join(factor_actions))
+
+st.markdown("### Suggested Additions (factor‑based)")
+def _weighted_mean_z(df: pd.DataFrame, weights: pd.Series) -> pd.Series:
+    if df.empty:
+        return pd.Series(dtype=float)
+    out = {}
+    for col in [c for c in df.columns if c.endswith("_z")]:
+        series = df[col].reindex(weights.index)
+        mask = series.notna() & weights.notna()
+        if mask.any():
+            out[col] = float(np.average(series[mask], weights=weights[mask]))
+    return pd.Series(out).sort_values()
+
+weak_factors = pd.Series(dtype=float)
+weights_norm = weights_named / (weights_named.sum() or 1.0)
+fund_weak = _weighted_mean_z(fdf_all.reindex(tickers_shown), weights_norm)
+tech_weak = _weighted_mean_z(tech_all.reindex(tickers_shown), weights_norm)
+weak_factors = pd.concat([fund_weak, tech_weak]).sort_values().head(3)
+
+if weak_factors.empty:
+    st.caption("Not enough factor data to generate recommendations.")
+else:
+    weak_labels = [ _pretty_factor(k) for k in weak_factors.index ]
+    st.caption("Weakest factors: " + ", ".join(weak_labels) + ".")
+    if st.button("Generate recommendations", type="secondary", use_container_width=True):
+        factor_z = pd.concat([fdf_all, tech_all[[c for c in tech_all.columns if c.endswith("_z")]]], axis=1)
+        cand = factor_z.reindex(out_all.index).drop(index=tickers_shown, errors="ignore")
+        use_cols = [c for c in weak_factors.index if c in cand.columns]
+        if not use_cols:
+            st.caption("Candidate data is sparse for weak factors.")
+        else:
+            cand["improve_score"] = cand[use_cols].mean(axis=1)
+            cand = cand.dropna(subset=["improve_score"]).sort_values("improve_score", ascending=False).head(10)
+            cand = cand.join(out_all[["RATING_0_100","COMPOSITE"]], how="left")
+            cand["Sector"] = [fetch_sector(t) for t in cand.index]
+            why = []
+            for t in cand.index:
+                top = cand.loc[t, use_cols].sort_values(ascending=False).head(2)
+                why.append(", ".join([_pretty_factor(k) for k in top.index]))
+            cand["Why"] = why
+            show_cols = ["Sector","improve_score","RATING_0_100","Why"]
+            st.dataframe(cand[show_cols].rename(columns={"RATING_0_100":"Score (0–100)"}).round(3), use_container_width=True)
+            st.caption(
+                "Ideas are ranked by strength on your weakest factors using the current peer universe. "
+                "Use as a starting point, not investment advice."
+            )
 tabs = st.tabs(["Cumulative", "Volatility (60d) & Sharpe", "Drawdown"])
 with tabs[0]:
     st.subheader("Cumulative growth (set = 1.0)")
