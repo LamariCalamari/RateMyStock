@@ -136,6 +136,21 @@ def _recommendation_mean_label(value: float) -> str:
     return "Sell bias"
 
 
+def _horizon_years(horizon: str) -> float:
+    mapping = {
+        "< 1 year": 1.0,
+        "1 - 3 years": 2.0,
+        "3 - 7 years": 5.0,
+        "7 - 15 years": 10.0,
+        "15+ years": 20.0,
+    }
+    return float(mapping.get(horizon, 5.0))
+
+
+def _is_short_horizon(horizon: str) -> bool:
+    return _horizon_years(horizon) <= 3.0
+
+
 def _zscore(s: pd.Series) -> pd.Series:
     vals = pd.to_numeric(s, errors="coerce")
     if vals.notna().sum() <= 1:
@@ -200,7 +215,8 @@ def _risk_score_from_answers(
         "Very High": 88,
     }
     horizon_map = {
-        "< 3 years": 18,
+        "< 1 year": 10,
+        "1 - 3 years": 22,
         "3 - 7 years": 44,
         "7 - 15 years": 67,
         "15+ years": 82,
@@ -232,8 +248,10 @@ def _strategic_allocation(
     include_crypto: bool,
     inflation_concern: bool,
 ) -> Dict[str, float]:
+    short_horizon = _is_short_horizon(horizon)
     horizon_adj = {
-        "< 3 years": -0.20,
+        "< 1 year": -0.35,
+        "1 - 3 years": -0.20,
         "3 - 7 years": -0.05,
         "7 - 15 years": 0.03,
         "15+ years": 0.07,
@@ -261,8 +279,10 @@ def _strategic_allocation(
         alternatives = float(np.clip(alternatives, 0.0, 0.10))
 
     cash = 0.03 + max(0.0, (35.0 - risk_score) / 100.0) * 0.14
-    if horizon == "< 3 years":
+    if short_horizon:
         cash = max(cash, 0.12)
+    if horizon == "< 1 year":
+        cash = max(cash, 0.16)
     if goal == "Capital preservation":
         cash = max(cash, 0.14)
     if goal == "Maximum growth":
@@ -270,7 +290,7 @@ def _strategic_allocation(
     cash = float(np.clip(cash, 0.02, 0.22))
 
     crypto = 0.0
-    if include_crypto and risk_score >= 70 and horizon != "< 3 years":
+    if include_crypto and risk_score >= 70 and not short_horizon:
         crypto = float(np.clip(0.01 + (risk_score - 70) * 0.0012, 0.0, 0.05))
 
     fixed_income = 1.0 - equity - alternatives - cash - crypto
@@ -291,7 +311,7 @@ def _strategic_allocation(
     intl_equity = max(0.0, equity - us_equity)
 
     em_frac = 0.10 + 0.18 * (risk_score / 100.0)
-    if horizon == "< 3 years":
+    if short_horizon:
         em_frac = min(em_frac, 0.08)
     em_frac = float(np.clip(em_frac, 0.06, 0.30))
     em_w = intl_equity * em_frac
@@ -341,10 +361,14 @@ def _strategic_allocation(
         fixed_mix["US Aggregate Bonds"] += 0.08
         fixed_mix["Short Treasuries / Cash"] -= 0.05
         fixed_mix["Treasury Intermediate"] -= 0.03
-    if horizon == "< 3 years":
+    if short_horizon:
         fixed_mix["Short Treasuries / Cash"] += 0.12
         fixed_mix["US Aggregate Bonds"] -= 0.08
         fixed_mix["Treasury Intermediate"] -= 0.04
+    if horizon == "< 1 year":
+        fixed_mix["Short Treasuries / Cash"] += 0.15
+        fixed_mix["US Aggregate Bonds"] -= 0.10
+        fixed_mix["Treasury Intermediate"] -= 0.05
 
     fixed_mix = _normalize_weights(fixed_mix)
 
@@ -367,10 +391,28 @@ def _strategic_allocation(
     if crypto > 0:
         weights["Crypto Sleeve"] = weights.get("Crypto Sleeve", 0.0) + crypto
 
-    return _normalize_weights(weights)
+    out = _normalize_weights(weights)
+    if horizon == "< 1 year":
+        high_vol_buckets = ("US Growth", "US Small Cap Value", "Emerging Markets", "Crypto Sleeve")
+        cut = 0.0
+        for b in high_vol_buckets:
+            if b in out:
+                reduce_by = out[b] * 0.5
+                out[b] = max(0.0, out[b] - reduce_by)
+                cut += reduce_by
+        if cut > 0:
+            out["Short Treasuries / Cash"] = out.get("Short Treasuries / Cash", 0.0) + cut * 0.65
+            out["US Aggregate Bonds"] = out.get("US Aggregate Bonds", 0.0) + cut * 0.35
+        out = _normalize_weights(out)
+    return out
 
 
-def _apply_macro_overlay(weights: Dict[str, float], macro_pack: Dict[str, float], risk_score: int) -> Tuple[Dict[str, float], str]:
+def _apply_macro_overlay(
+    weights: Dict[str, float],
+    macro_pack: Dict[str, float],
+    risk_score: int,
+    horizon: str,
+) -> Tuple[Dict[str, float], str]:
     w = dict(weights)
     macro = float(np.clip(macro_pack.get("macro", 0.5), 0.0, 1.0))
     note = "No macro tilt applied."
@@ -391,7 +433,7 @@ def _apply_macro_overlay(weights: Dict[str, float], macro_pack: Dict[str, float]
             w["US Quality/Dividend"] = w.get("US Quality/Dividend", 0.0) + cut * 0.15
         note = "Macro is risk-off, so growth/emerging sleeves were trimmed toward cash/bonds."
 
-    elif macro > 0.65 and risk_score >= 55:
+    elif macro > 0.65 and risk_score >= 55 and _horizon_years(horizon) > 1.5:
         intensity = (macro - 0.65) / 0.35
         max_shift = 0.02 + 0.04 * intensity
         from_short = min(w.get("Short Treasuries / Cash", 0.0), max_shift * 0.65)
@@ -406,6 +448,40 @@ def _apply_macro_overlay(weights: Dict[str, float], macro_pack: Dict[str, float]
             note = "Macro is risk-on, so part of defensive weight was shifted to growth sleeves."
 
     return _normalize_weights(w), note
+
+
+def _projection_paths(
+    initial_capital: float,
+    monthly_contribution: float,
+    annual_return: float,
+    horizon_years: float,
+) -> Tuple[pd.DataFrame, float, float, int]:
+    months = int(max(round(horizon_years * 12), 1))
+    initial = float(max(initial_capital, 0.0))
+    monthly = float(max(monthly_contribution, 0.0))
+    annual_r = float(annual_return)
+    monthly_r = (1.0 + annual_r) ** (1.0 / 12.0) - 1.0 if annual_r > -0.999 else -0.999
+
+    balances_with_add = [initial]
+    balances_no_add = [initial]
+    current_with = initial
+    current_without = initial
+    for _ in range(months):
+        current_with = current_with * (1.0 + monthly_r) + monthly
+        current_without = current_without * (1.0 + monthly_r)
+        balances_with_add.append(current_with)
+        balances_no_add.append(current_without)
+
+    idx = pd.RangeIndex(start=0, stop=months + 1, step=1, name="Month")
+    df = pd.DataFrame(
+        {
+            "With monthly adds": balances_with_add,
+            "Initial only": balances_no_add,
+        },
+        index=idx,
+    )
+    principal = initial + monthly * months
+    return df, float(df["With monthly adds"].iloc[-1]), float(principal), months
 
 
 def _extract_news_fields(item: Dict[str, object]) -> Dict[str, object]:
@@ -557,6 +633,7 @@ def _score_bucket_candidates(
 def _build_etf_recommendations(
     weights: Dict[str, float],
     invest_amount: float,
+    monthly_contribution: float,
 ) -> Tuple[pd.DataFrame, Optional[pd.Timestamp]]:
     active_buckets = [b for b, w in weights.items() if w >= 0.01 and b in BUCKET_CANDIDATES]
     if not active_buckets:
@@ -612,6 +689,7 @@ def _build_etf_recommendations(
             "Bucket": bucket,
             "Weight %": bucket_weight * 100.0,
             "Amount ($)": invest_amount * bucket_weight if invest_amount > 0 else np.nan,
+            "Monthly Add ($)": monthly_contribution * bucket_weight if monthly_contribution > 0 else np.nan,
             "Suggested ETF": choice,
             "Backup ETF": backup,
             "Signal Score": _coerce_float(stats.get("signal_score", np.nan)),
@@ -746,8 +824,8 @@ with c1:
 with c2:
     horizon = st.selectbox(
         "Investment horizon",
-        ["< 3 years", "3 - 7 years", "7 - 15 years", "15+ years"],
-        index=2,
+        ["< 1 year", "1 - 3 years", "3 - 7 years", "7 - 15 years", "15+ years"],
+        index=3,
     )
 with c3:
     risk_tolerance = st.selectbox(
@@ -755,14 +833,18 @@ with c3:
         ["Low", "Medium", "High", "Very High"],
         index=1,
     )
+if horizon == "< 1 year":
+    st.info("1-year horizon selected: the builder automatically shifts toward lower-volatility allocations.")
 
-c4, c5, c6 = st.columns(3)
+c4, c5, c6, c13 = st.columns(4)
 with c4:
     expected_return = st.slider("Expected long-run annual return (%)", 4.0, 18.0, 8.0, 0.5)
 with c5:
     max_drawdown = st.slider("Temporary drawdown you can tolerate (%)", 5, 60, 25, 5)
 with c6:
     invest_amount = st.number_input("Amount to invest now ($)", min_value=0.0, value=10000.0, step=500.0)
+with c13:
+    monthly_contribution = st.number_input("Monthly contribution ($)", min_value=0.0, value=500.0, step=50.0)
 
 c7, c8, c9 = st.columns(3)
 with c7:
@@ -786,7 +868,8 @@ with c12:
 
 run_sig = (
     goal, horizon, risk_tolerance, expected_return, max_drawdown,
-    invest_amount, region, style, n_ideas, include_alts, inflation_concern, include_crypto,
+    invest_amount, monthly_contribution, region, style, n_ideas,
+    include_alts, inflation_concern, include_crypto,
 )
 if st.session_state.get("builder_sig") != run_sig:
     st.session_state["builder_ready"] = False
@@ -830,11 +913,11 @@ with st.status("Designing your portfolio...", expanded=True) as status:
 
     msg.info("Step 2/5: pulling the latest macro regime signals.")
     macro_pack = fetch_macro_pack(period="6mo", interval="1d")
-    tilted_weights, macro_note = _apply_macro_overlay(base_weights, macro_pack, risk_score)
+    tilted_weights, macro_note = _apply_macro_overlay(base_weights, macro_pack, risk_score, horizon)
     prog.progress(40)
 
     msg.info("Step 3/5: selecting concrete ETFs within each allocation bucket.")
-    etf_df, market_ts = _build_etf_recommendations(tilted_weights, invest_amount)
+    etf_df, market_ts = _build_etf_recommendations(tilted_weights, invest_amount, monthly_contribution)
     prog.progress(70)
 
     msg.info("Step 4/5: generating optional stock ideas with live estimates.")
@@ -850,6 +933,13 @@ with st.status("Designing your portfolio...", expanded=True) as status:
     est_return = sum(tilted_weights.get(k, 0.0) * BUCKET_RETURN_ASSUMPTION.get(k, 0.06) for k in tilted_weights)
     est_vol = sum(tilted_weights.get(k, 0.0) * BUCKET_VOL_ASSUMPTION.get(k, 0.12) for k in tilted_weights)
     downside_case = est_return - 1.65 * est_vol
+    horizon_years = _horizon_years(horizon)
+    proj_df, projected_end_value, total_principal, projection_months = _projection_paths(
+        initial_capital=invest_amount,
+        monthly_contribution=monthly_contribution,
+        annual_return=est_return,
+        horizon_years=horizon_years,
+    )
     prog.progress(100)
     status.update(label="Portfolio plan ready.", state="complete")
 
@@ -875,6 +965,20 @@ m2.metric("Estimated annual return", f"{est_return * 100:.1f}%")
 m3.metric("Estimated annual volatility", f"{est_vol * 100:.1f}%")
 m4.metric("Stress-case year (rough)", f"{downside_case * 100:.1f}%")
 
+p1, p2, p3, p4 = st.columns(4)
+p1.metric("Monthly contribution", f"${monthly_contribution:,.0f}")
+p2.metric("Projection horizon", f"{projection_months} months")
+p3.metric("Projected end value", f"${projected_end_value:,.0f}")
+p4.metric("Total principal invested", f"${total_principal:,.0f}")
+
+if not proj_df.empty:
+    st.line_chart(proj_df, use_container_width=True)
+    gains = projected_end_value - total_principal
+    st.caption(
+        f"Projection uses your estimated return assumption. Estimated gain above principal: "
+        f"{gains:,.0f} USD over {projection_months} months."
+    )
+
 if market_ts is not None and pd.notna(market_ts):
     st.caption(f"Latest market close used in ETF ranking: {pd.to_datetime(market_ts).strftime('%Y-%m-%d')}")
 st.caption(macro_note)
@@ -886,6 +990,8 @@ alloc_df = (
 )
 if invest_amount > 0:
     alloc_df["Amount ($)"] = alloc_df["Weight %"] / 100.0 * invest_amount
+if monthly_contribution > 0:
+    alloc_df["Monthly Add ($)"] = alloc_df["Weight %"] / 100.0 * monthly_contribution
 
 st.markdown("### Strategic Allocation")
 st.dataframe(alloc_df.round(2), use_container_width=True, hide_index=True)
@@ -896,7 +1002,7 @@ if etf_df.empty:
     st.warning("Could not fetch live ETF data right now. The strategic allocation above is still valid.")
 else:
     show_cols = [
-        "Bucket", "Weight %", "Amount ($)", "Suggested ETF", "Backup ETF",
+        "Bucket", "Weight %", "Amount ($)", "Monthly Add ($)", "Suggested ETF", "Backup ETF",
         "Signal Score", "1Y Return %", "Ann. Vol %", "Max Drawdown %",
         "Price", "Expense Ratio %", "Yield %", "News Tone", "Latest Headline",
         "Headline Source", "Headline Time",
@@ -924,9 +1030,10 @@ st.markdown("### What This Engine Is Doing")
 st.markdown(
     "1. Converts your questionnaire answers into a risk score and strategic bucket mix.\n"
     "2. Applies a macro overlay using live multi-signal regime data.\n"
-    "3. Picks ETF candidates within each bucket using recent momentum/volatility behavior.\n"
-    "4. Enriches picks with latest headlines and estimate fields to keep outputs timely.\n"
-    "5. Produces a beginner-friendly starter plan you can refine in `Rate My Portfolio`."
+    "3. Maps both lump-sum and monthly contributions into the same allocation weights.\n"
+    "4. Picks ETF candidates within each bucket using recent momentum/volatility behavior.\n"
+    "5. Enriches picks with latest headlines and estimate fields to keep outputs timely.\n"
+    "6. Produces a beginner-friendly starter plan you can refine in `Rate My Portfolio`."
 )
 
 export_name = f"portfolio_builder_plan_{run_ts.strftime('%Y%m%d_%H%M%S')}.csv"
