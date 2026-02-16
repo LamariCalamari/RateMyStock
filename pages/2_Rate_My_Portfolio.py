@@ -4,10 +4,8 @@ import pandas as pd
 import streamlit as st
 from app_utils import (
     inject_css, brand_header, yf_symbol, fetch_prices_chunked_with_fallback,
-    fetch_vix_series, fetch_gold_series, fetch_dxy_series, fetch_tnx_series, fetch_credit_ratio_series,
-    macro_from_signals, technical_scores, fetch_fundamentals_simple,
-    zscore_series, percentile_rank, build_universe, fetch_sector,
-    SCORING_CONFIG, score_label
+    fetch_macro_pack, score_universe_panel, build_universe, fetch_sector,
+    SCORING_CONFIG, score_label, FACTOR_LABELS, weighted_series_mean, portfolio_signal_score
 )
 
 st.set_page_config(page_title="Rate My Portfolio", layout="wide")
@@ -68,44 +66,6 @@ def sync_percent_amount(df: pd.DataFrame, total: float | None, mode: str) -> pd.
         w=pd.Series([1.0/n]*n, index=df.index)
     df["weight"]=w
     return df
-
-def _cap_z(s: pd.Series, cap: float | None = None) -> pd.Series:
-    cap = SCORING_CONFIG["z_cap"] if cap is None else cap
-    return s.clip(-cap, cap)
-
-def _composite_row(row: pd.Series, weights: dict) -> float:
-    total = sum(w for k, w in weights.items() if pd.notna(row.get(k)))
-    if total == 0:
-        return np.nan
-    return float(sum(row.get(k) * w for k, w in weights.items() if pd.notna(row.get(k))) / total)
-
-def _coverage(df: pd.DataFrame, tickers: list[str], cols: list[str]) -> float:
-    if df.empty or not cols:
-        return 0.0
-    valid = [t for t in tickers if t in df.index]
-    if not valid:
-        return 0.0
-    return float(df.loc[valid, cols].notna().mean().mean())
-
-FACTOR_LABELS = {
-    "revenueGrowth_z": "Revenue growth",
-    "earningsGrowth_z": "Earnings growth",
-    "returnOnEquity_z": "ROE",
-    "returnOnAssets_z": "ROA",
-    "profitMargins_z": "Profit margin",
-    "grossMargins_z": "Gross margin",
-    "operatingMargins_z": "Operating margin",
-    "ebitdaMargins_z": "EBITDA margin",
-    "trailingPE_z": "P/E (lower is better)",
-    "forwardPE_z": "Forward P/E (lower is better)",
-    "enterpriseToEbitda_z": "EV/EBITDA (lower is better)",
-    "fcfYield_z": "FCF yield",
-    "debtToEquity_z": "Debt/Equity (lower is better)",
-    "dma_gap_z": "Price vs EMA50",
-    "macd_hist_z": "MACD momentum",
-    "rsi_strength_z": "RSI strength",
-    "mom12m_z": "12m momentum",
-}
 
 def _pretty_factor(col: str) -> str:
     return FACTOR_LABELS.get(col, col.replace("_z", "").replace("_", " ").title())
@@ -240,40 +200,27 @@ with st.status("Crunching the numbers…", expanded=True) as status:
     pct.markdown("**Progress: 40%**")
 
     panel_all = {t: prices[t].dropna() for t in prices.columns if t in prices.columns and prices[t].dropna().size>0}
-    msg.info("Step 3/4: computing technical signals.")
-    tech_all = technical_scores(panel_all)
-    for col in ["dma_gap","macd_hist","rsi_strength","mom12m"]:
-        if col in tech_all.columns: tech_all[f"{col}_z"] = _cap_z(zscore_series(tech_all[col]))
-    TECH_score_all = tech_all[[c for c in ["dma_gap_z","macd_hist_z","rsi_strength_z","mom12m_z"] if c in tech_all.columns]].mean(axis=1)
+    msg.info("Step 3/4: loading macro regime.")
+    macro_pack = fetch_macro_pack(period="6mo", interval="1d")
     prog.progress(65)
     pct.markdown("**Progress: 65%**")
 
-    msg.info("Step 4/4: computing fundamentals + macro.")
-    fund_raw_all = fetch_fundamentals_simple(list(panel_all.keys()))
-    core_fund = [
-        "revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
-        "profitMargins","grossMargins","operatingMargins","ebitdaMargins","fcfYield",
-        "trailingPE","forwardPE","enterpriseToEbitda","debtToEquity"
-    ]
-    core_present = [c for c in core_fund if c in fund_raw_all.columns]
-    if core_present:
-        min_fund_cols = SCORING_CONFIG["min_fund_cols"]
-        fund_raw_all = fund_raw_all[fund_raw_all[core_present].notna().sum(axis=1) >= min_fund_cols]
-    fdf_all = pd.DataFrame(index=fund_raw_all.index)
-    for col in ["revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
-                "profitMargins","grossMargins","operatingMargins","ebitdaMargins","fcfYield"]:
-        if col in fund_raw_all.columns: fdf_all[f"{col}_z"]=_cap_z(zscore_series(fund_raw_all[col]))
-    for col in ["trailingPE","forwardPE","enterpriseToEbitda","debtToEquity"]:
-        if col in fund_raw_all.columns: fdf_all[f"{col}_z"]=_cap_z(zscore_series(-fund_raw_all[col]))
-    FUND_score_all = fdf_all.mean(axis=1) if len(fdf_all.columns) else pd.Series(dtype=float)
+    msg.info("Step 4/4: scoring universe with the shared engine.")
+    score_pack = score_universe_panel(
+        panel_all,
+        target_count=target_count,
+        macro_pack=macro_pack,
+        min_fund_cols=SCORING_CONFIG["min_fund_cols"],
+    )
+    out_all = score_pack["out"]
+    fdf_all = score_pack["fund"]
+    tech_all = score_pack["tech"]
+    score_weights = score_pack["weights"]
+    wf = score_weights["FUND_score"]
+    wt = score_weights["TECH_score"]
+    wm = score_weights["MACRO_score"]
+    MACRO = float(macro_pack["macro"])
     prog.progress(85)
-
-    vix_series = fetch_vix_series(period="6mo", interval="1d")
-    gold_series = fetch_gold_series(period="6mo", interval="1d")
-    dxy_series = fetch_dxy_series(period="6mo", interval="1d")
-    tnx_series = fetch_tnx_series(period="6mo", interval="1d")
-    credit_series = fetch_credit_ratio_series(period="6mo", interval="1d")
-    MACRO = macro_from_signals(vix_series, gold_series, dxy_series, tnx_series, credit_series)["macro"]
     prog.progress(100)
     pct.markdown("**Progress: 100%**")
     status.update(label="Done!", state="complete")
@@ -282,20 +229,9 @@ st.markdown(
     f'<div class="banner">Peers loaded: <b>{len(panel_all)}</b> / <b>{target_count}</b> '
     f'&nbsp;|&nbsp; Peer set: <b>{label}</b></div>', unsafe_allow_html=True
 )
-
-idx_all = pd.Index(list(panel_all.keys()))
-out_all = pd.DataFrame(index=idx_all)
-out_all["FUND_score"]  = FUND_score_all.reindex(idx_all)
-out_all["TECH_score"]  = TECH_score_all.reindex(idx_all)
-out_all["MACRO_score"] = MACRO
-wsum = sum(SCORING_CONFIG["weights"].values()) or 1.0
-wf = SCORING_CONFIG["weights"]["fund"] / wsum
-wt = SCORING_CONFIG["weights"]["tech"] / wsum
-wm = SCORING_CONFIG["weights"]["macro"] / wsum
-weights = {"FUND_score": wf, "TECH_score": wt, "MACRO_score": wm}
-out_all["COMPOSITE"] = out_all.apply(_composite_row, axis=1, weights=weights)
-ratings = percentile_rank(out_all["COMPOSITE"].dropna())
-out_all["RATING_0_100"] = ratings.reindex(out_all.index)
+if out_all.empty:
+    st.error("Unable to compute scores for this universe.")
+    st.stop()
 
 weights = None
 if total and total>0 and _safe_num(out["Amount"]).sum()>0:
@@ -344,21 +280,34 @@ DIV = 0.5*sector_div + 0.3*corr_div + 0.2*name_div
 
 per_name = out_all.reindex(tickers_shown).copy()
 per_name = per_name.assign(weight = list(weights_named.values))
-per_name["weighted_composite"] = per_name["COMPOSITE"]*per_name["weight"]
-port_signal = float(per_name["weighted_composite"].sum())
-total_for_final = 1.0 + 0.05
-port_final = (port_signal)*(1/total_for_final) + DIV*(0.05/total_for_final)
-port_score = float(np.clip((port_final+1)/2, 0, 1)*100)
+eff_w = per_name["weight"].where(per_name["COMPOSITE"].notna(), 0.0).fillna(0.0)
+eff_w = eff_w / (eff_w.sum() or 1.0)
+per_name["weight_eff"] = eff_w
+per_name["weighted_composite"] = per_name["COMPOSITE"] * per_name["weight_eff"]
+port_pack = portfolio_signal_score(
+    out_all["COMPOSITE"],
+    per_name["COMPOSITE"],
+    weights_named,
+    diversification=DIV,
+    diversification_bonus_points=5.0,
+)
+port_signal = float(port_pack["signal"]) if pd.notna(port_pack["signal"]) else np.nan
+signal_pct = float(port_pack["signal_percentile"]) if pd.notna(port_pack["signal_percentile"]) else np.nan
+port_score = float(port_pack["final_score"]) if pd.notna(port_pack["final_score"]) else np.nan
+div_bonus_pts = float(port_pack["diversification_bonus"])
+if pd.isna(port_score):
+    st.error("Portfolio score unavailable due to missing holdings factor coverage.")
+    st.stop()
 
 st.markdown("## 🧺 Portfolio — Scores")
 a,b,c,d = st.columns(4)
 a.metric("Portfolio Score (0–100)", f"{port_score:.1f}")
-b.metric("Signal (weighted composite)", f"{port_signal:.3f}")
+b.metric("Signal Percentile vs Peers", f"{signal_pct:.1f}")
 c.metric("Macro (Multi-signal)", f"{MACRO:.3f}")
 d.metric("Diversification", f"{DIV:.3f}")
 st.caption(
     f"Interpretation: **{score_label(port_score)}**. "
-    "Score blends fundamentals, technicals, and macro; diversification rewards lower concentration and correlations."
+    "Score is peer-relative percentile of your weighted signal, then adjusted by diversification."
 )
 
 st.markdown("### Score Bands")
@@ -389,37 +338,46 @@ for i, (label, color) in enumerate(bands):
 st.markdown(f"<div style='display:flex;gap:6px;'>{''.join(cells)}</div>", unsafe_allow_html=True)
 st.caption(f"Current score band highlighted (score {port_score:.1f}).")
 
-tech_cols = [c for c in tech_all.columns if c.endswith("_z")]
-fund_cols = [c for c in fdf_all.columns if c.endswith("_z")]
-peer_factor = min(len(out_all["COMPOSITE"].dropna()) / max(target_count, 1), 1.0)
-cw = SCORING_CONFIG["confidence_weights"]
-port_conf = 100.0 * (cw["peer"]*peer_factor + cw["fund"]*_coverage(fdf_all, tickers_shown, fund_cols) + cw["tech"]*_coverage(tech_all, tickers_shown, tech_cols))
+conf_row = out_all.reindex(tickers_shown)["CONFIDENCE"].fillna(0.0)
+if conf_row.size and weights_named.sum() > 0:
+    port_conf = float(np.average(conf_row, weights=weights_named.reindex(conf_row.index).fillna(0.0)))
+else:
+    port_conf = float(conf_row.mean()) if conf_row.size else 0.0
 st.caption(f"Confidence: {port_conf:.0f}/100 based on data coverage and peer sample size.")
 
 with st.expander("How to read this portfolio analysis"):
     st.markdown(
         "- **Portfolio Score** blends Fundamentals, Technicals, Macro, plus a small Diversification bonus.  \n"
-        "- **Signal (weighted composite)** summarizes peer‑relative strength (>0 means above peer average).  \n"
+        "- **Signal percentile** shows where your weighted portfolio signal sits vs the peer universe.  \n"
         "- **Macro** reflects the broader risk regime (VIX, USD, rates, credit, gold).  \n"
         "- **Diversification** rewards balanced sector mix, low concentration, and lower correlations.  \n"
         "- **Confidence** depends on peer size + data coverage; lower confidence means interpret cautiously."
     )
 
 st.markdown("### Signal Decomposition")
-fund_contrib = float((per_name["FUND_score"] * per_name["weight"]).sum())
-tech_contrib = float((per_name["TECH_score"] * per_name["weight"]).sum())
-macro_contrib = float((per_name["MACRO_score"] * per_name["weight"]).sum())
-div_bonus = float(DIV * 0.05)
+fund_level = weighted_series_mean(per_name["FUND_score"], weights_named)
+tech_level = weighted_series_mean(per_name["TECH_score"], weights_named)
+macro_level = weighted_series_mean(per_name["MACRO_score"], weights_named)
+fund_contrib = float(0.0 if pd.isna(fund_level) else fund_level * wf)
+tech_contrib = float(0.0 if pd.isna(tech_level) else tech_level * wt)
+macro_contrib = float(0.0 if pd.isna(macro_level) else macro_level * wm)
 st.dataframe(
     pd.DataFrame(
         {
-            "Component": ["Fundamentals", "Technicals", "Macro", "Diversification bonus"],
-            "Contribution": [fund_contrib, tech_contrib, macro_contrib, div_bonus],
+            "Component": [
+                "Fundamentals contribution",
+                "Technicals contribution",
+                "Macro contribution",
+                "Weighted signal",
+                "Signal percentile",
+                "Diversification bonus (points)",
+            ],
+            "Contribution": [fund_contrib, tech_contrib, macro_contrib, port_signal, signal_pct, div_bonus_pts],
         }
     ).set_index("Component").round(4),
     use_container_width=True,
 )
-st.caption("Contributions show how each component lifts or drags the portfolio signal.")
+st.caption("Contributions are coverage-adjusted; missing factor data no longer gets treated as zero weight.")
 
 
 st.markdown("### Allocation Snapshot")
@@ -627,12 +585,18 @@ if not actions:
 st.markdown("- " + "\n- ".join(actions))
 
 st.markdown("### What Would Improve the Score Most?")
-driver_weights = pd.Series({"Fundamentals": wf, "Technicals": wt, "Macro": wm})
+def _z_to_unit(x: float) -> float:
+    if pd.isna(x):
+        return np.nan
+    return float(0.5 + 0.5 * np.tanh(float(x)))
+
+fund_level_z = weighted_series_mean(per_name["FUND_score"], weights_named)
+tech_level_z = weighted_series_mean(per_name["TECH_score"], weights_named)
 drivers = pd.DataFrame({
     "Driver": ["Fundamentals", "Technicals", "Macro", "Diversification"],
     "Current": [
-        float(np.nanmean(per_name["FUND_score"])),
-        float(np.nanmean(per_name["TECH_score"])),
+        _z_to_unit(fund_level_z),
+        _z_to_unit(tech_level_z),
         float(MACRO),
         float(DIV),
     ],
@@ -651,13 +615,7 @@ if not fdf_all.empty:
     f_means = fdf_all.mean().sort_values()
     for col in f_means.index[:3]:
         if col.endswith("_z") and f_means[col] < 0:
-            label = col.replace("_z","").replace("returnOnEquity","ROE").replace("returnOnAssets","ROA")
-            label = label.replace("profitMargins","Profit Margin").replace("grossMargins","Gross Margin")
-            label = label.replace("operatingMargins","Operating Margin").replace("ebitdaMargins","EBITDA Margin")
-            label = label.replace("trailingPE","P/E").replace("forwardPE","Forward P/E")
-            label = label.replace("enterpriseToEbitda","EV/EBITDA").replace("debtToEquity","Debt/Equity")
-            label = label.replace("revenueGrowth","Revenue Growth").replace("earningsGrowth","Earnings Growth")
-            label = label.replace("fcfYield","FCF Yield")
+            label = _pretty_factor(col)
             direction = "increase exposure to names with stronger" if "PE" not in label and "Debt" not in label else "reduce exposure to expensive/leverage‑heavy names"
             factor_actions.append(f"- **{label}:** {direction}.")
 if fdf_all.empty:

@@ -133,7 +133,9 @@ st.markdown(
     "- EMA gap (price vs EMA50)  \n"
     "- MACD histogram  \n"
     "- RSI strength  \n"
-    "- 12‑month momentum"
+    "- 3m / 6m / 12m momentum  \n"
+    "- Trend structure (EMA20 vs EMA50)  \n"
+    "- Volatility + drawdown resilience"
 )
 st.markdown(
     "**Macro (multi‑signal)**  \n"
@@ -154,8 +156,9 @@ st.markdown(
 
 st.markdown("## 3) Standardization")
 st.markdown(
-    "Each numeric factor is **z‑scored** against the peer group and clipped to reduce outliers:  \n"
-    "`z = (x − μ) / σ`  \n"
+    "Each numeric factor is standardized against the peer group and clipped to reduce outliers.  \n"
+    "By default we use a **robust z‑score** (median/MAD) with classical z-score fallback when needed:  \n"
+    "`z_robust ≈ 0.6745 × (x − median) / MAD`  \n"
     "For valuation and leverage where *lower is better*, we invert before z‑scoring."
 )
 
@@ -178,7 +181,8 @@ st.markdown("## 6) Portfolio Score (Weighted Holdings)")
 st.markdown(
     "For a portfolio, each holding’s composite score is weighted by its portfolio allocation:  \n"
     "`PortfolioSignal = Σ(Weight_i × Composite_i)`  \n"
-    "We then blend a small diversification bonus to reward lower concentration and lower correlations."
+    "Missing-factor holdings are re‑normalized (not treated as zero).  \n"
+    "The signal is converted into a **peer percentile score (0–100)**, then adjusted by a small diversification bonus."
 )
 st.markdown(
     "**Diversification (simplified):**  \n"
@@ -220,7 +224,8 @@ st.markdown(
     "Confidence reflects data coverage and peer sample size:  \n"
     "- Peer coverage (how many peers actually loaded)  \n"
     "- Fundamentals coverage (% of factor z‑scores available)  \n"
-    "- Technicals coverage (% of factor z‑scores available)"
+    "- Technicals coverage (% of factor z‑scores available)  \n"
+    "- Macro signal coverage (how many macro inputs were available)"
 )
 st.markdown(
     "**What coverage means:**  \n"

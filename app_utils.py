@@ -129,6 +129,8 @@ SCORING_CONFIG = {
     "weights": {"fund": 0.50, "tech": 0.45, "macro": 0.05},
     "z_cap": 2.5,
     "min_fund_cols": 6,
+    "factor_min_coverage": 0.25,
+    "cross_section_shrink_target": 30,
     "peer_min_industry": 25,
     "peer_min_sector": 40,
     "confidence_weights": {"peer": 0.4, "fund": 0.3, "tech": 0.3},
@@ -416,47 +418,364 @@ def build_universe(user_tickers: List[str], mode: str,
 
 # ============================== Features / Scores ==============================
 
+FUNDAMENTAL_POSITIVE_FACTORS = [
+    "revenueGrowth", "earningsGrowth", "returnOnEquity", "returnOnAssets",
+    "profitMargins", "grossMargins", "operatingMargins", "ebitdaMargins", "fcfYield",
+]
+FUNDAMENTAL_INVERTED_FACTORS = [
+    "trailingPE", "forwardPE", "enterpriseToEbitda", "debtToEquity",
+]
+TECHNICAL_POSITIVE_FACTORS = [
+    "dma_gap", "macd_hist", "rsi_strength", "mom12m", "mom6m", "mom3m", "trend_ema20_50", "drawdown6m",
+]
+TECHNICAL_INVERTED_FACTORS = ["vol63"]
+FACTOR_LABELS = {
+    "revenueGrowth_z": "Revenue growth",
+    "earningsGrowth_z": "Earnings growth",
+    "returnOnEquity_z": "ROE",
+    "returnOnAssets_z": "ROA",
+    "profitMargins_z": "Profit margin",
+    "grossMargins_z": "Gross margin",
+    "operatingMargins_z": "Operating margin",
+    "ebitdaMargins_z": "EBITDA margin",
+    "trailingPE_z": "P/E (lower is better)",
+    "forwardPE_z": "Forward P/E (lower is better)",
+    "enterpriseToEbitda_z": "EV/EBITDA (lower is better)",
+    "fcfYield_z": "FCF yield",
+    "debtToEquity_z": "Debt/Equity (lower is better)",
+    "dma_gap_z": "Price vs EMA50",
+    "macd_hist_z": "MACD momentum",
+    "rsi_strength_z": "RSI strength",
+    "mom12m_z": "12m momentum",
+    "mom6m_z": "6m momentum",
+    "mom3m_z": "3m momentum",
+    "trend_ema20_50_z": "EMA20 vs EMA50",
+    "vol63_z": "Volatility (lower is better)",
+    "drawdown6m_z": "6m drawdown resilience",
+}
+
+
+def robust_zscore_series(s: pd.Series, cap: float | None = None) -> pd.Series:
+    """
+    Robust z-score using median/MAD with std-dev fallback.
+    Falls back to classical z-score when MAD is degenerate.
+    """
+    x = pd.to_numeric(s, errors="coerce")
+    med = x.median(skipna=True)
+    mad = (x - med).abs().median(skipna=True)
+    if pd.isna(mad) or mad <= 1e-12:
+        z = zscore_series(x)
+    else:
+        z = 0.67448975 * (x - med) / mad
+    cap = SCORING_CONFIG["z_cap"] if cap is None else cap
+    return z.clip(-cap, cap)
+
+
+def _sample_shrinkage(count_non_null: int, target: Optional[int] = None) -> float:
+    """
+    Damp cross-sectional z-scores when sample size is very small.
+    """
+    target = SCORING_CONFIG.get("cross_section_shrink_target", 30) if target is None else target
+    if count_non_null <= 1:
+        return 0.0
+    return float(np.clip(math.sqrt(count_non_null / max(target, 1)), 0.0, 1.0))
+
+
+def _component_score(zdf: pd.DataFrame, min_coverage: Optional[float] = None) -> pd.Series:
+    """
+    Coverage-aware component score:
+    - average of available z-factors
+    - scaled by sqrt(coverage) so sparse rows are less extreme
+    """
+    min_coverage = (
+        SCORING_CONFIG.get("factor_min_coverage", 0.25)
+        if min_coverage is None else min_coverage
+    )
+    if zdf is None or zdf.empty:
+        return pd.Series(dtype=float)
+    coverage = zdf.notna().mean(axis=1)
+    raw = zdf.mean(axis=1, skipna=True)
+    score = raw * np.sqrt(np.clip(coverage, 0.0, 1.0))
+    return score.where(coverage >= min_coverage, np.nan)
+
+
+def _weighted_row_average(df: pd.DataFrame, weights: Dict[str, float]) -> pd.Series:
+    """
+    Weighted average that renormalizes per row for missing components.
+    """
+    if df.empty:
+        return pd.Series(dtype=float)
+    w = pd.Series(weights, dtype=float)
+    cols = [c for c in w.index if c in df.columns]
+    if not cols:
+        return pd.Series(np.nan, index=df.index)
+    x = df[cols]
+    valid = x.notna()
+    num = x.mul(w[cols], axis=1).where(valid).sum(axis=1)
+    den = valid.mul(w[cols], axis=1).sum(axis=1)
+    return num / den.replace(0.0, np.nan)
+
+
+def weighted_series_mean(values: pd.Series, weights: pd.Series) -> float:
+    """
+    Weighted mean with automatic renormalization over non-null values.
+    """
+    v = pd.to_numeric(values, errors="coerce")
+    w = pd.to_numeric(weights, errors="coerce").reindex(v.index).fillna(0.0)
+    mask = v.notna() & (w > 0)
+    if not mask.any():
+        return float("nan")
+    ww = w[mask]
+    return float(np.average(v[mask], weights=ww))
+
+
+def portfolio_signal_score(
+    peer_composite: pd.Series,
+    holding_composite: pd.Series,
+    holding_weights: pd.Series,
+    diversification: float | None = None,
+    diversification_bonus_points: float = 5.0,
+) -> Dict[str, float]:
+    """
+    Convert weighted holding composite into a peer-relative portfolio score.
+
+    - signal: weighted mean composite across holdings (missing data renormalized)
+    - signal_percentile: percentile of signal within peer composite distribution (0-100)
+    - final_score: percentile plus optional diversification bonus (bounded 0-100)
+    """
+    peer = pd.to_numeric(peer_composite, errors="coerce").dropna()
+    hold = pd.to_numeric(holding_composite, errors="coerce")
+    w = pd.to_numeric(holding_weights, errors="coerce").reindex(hold.index).fillna(0.0)
+
+    valid = hold.notna() & (w > 0)
+    coverage_weight = float(w[valid].sum() / max(w.sum(), 1e-12)) if w.sum() > 0 else 0.0
+    if not valid.any():
+        return {
+            "signal": np.nan,
+            "signal_percentile": np.nan,
+            "final_score": np.nan,
+            "coverage_weight": coverage_weight,
+            "diversification_bonus": 0.0,
+        }
+
+    signal = float(np.average(hold[valid], weights=w[valid]))
+
+    if peer.empty:
+        signal_percentile = np.nan
+    else:
+        signal_percentile = float(100.0 * (peer <= signal).mean())
+
+    div_bonus = 0.0
+    if diversification is not None and pd.notna(diversification):
+        div = float(np.clip(diversification, 0.0, 1.0))
+        div_bonus = (div - 0.5) * (2.0 * diversification_bonus_points)
+
+    if pd.isna(signal_percentile):
+        final_score = np.nan
+    else:
+        final_score = float(np.clip(signal_percentile + div_bonus, 0.0, 100.0))
+
+    return {
+        "signal": signal,
+        "signal_percentile": signal_percentile,
+        "final_score": final_score,
+        "coverage_weight": coverage_weight,
+        "diversification_bonus": div_bonus,
+    }
+
+
+def normalize_score_weights(
+    fund_weight: Optional[float] = None,
+    tech_weight: Optional[float] = None,
+    macro_weight: Optional[float] = None,
+) -> Dict[str, float]:
+    wf = SCORING_CONFIG["weights"]["fund"] if fund_weight is None else float(max(0.0, fund_weight))
+    wt = SCORING_CONFIG["weights"]["tech"] if tech_weight is None else float(max(0.0, tech_weight))
+    wm = SCORING_CONFIG["weights"]["macro"] if macro_weight is None else float(max(0.0, macro_weight))
+    total = wf + wt + wm
+    if total <= 0:
+        wf, wt, wm = 1.0, 0.0, 0.0
+        total = 1.0
+    return {"FUND_score": wf / total, "TECH_score": wt / total, "MACRO_score": wm / total}
+
+
 def technical_scores(price_panel: Dict[str, pd.Series]) -> pd.DataFrame:
-    rows=[]
-    for ticker, px in price_panel.items():
-        px=px.dropna()
-        if len(px)<60: continue
-        ema50=ema(px,50)
-        base50=ema50.iloc[-1] if pd.notna(ema50.iloc[-1]) and ema50.iloc[-1]!=0 else np.nan
-        dma_gap=(px.iloc[-1]-ema50.iloc[-1])/base50 if pd.notna(base50) else np.nan
-        _,_,hist=macd(px)
-        macd_hist = hist.iloc[-1] if len(hist)>0 else np.nan
-        r = rsi(px).iloc[-1] if len(px)>14 else np.nan
-        rsi_strength=(r-50.0)/50.0 if pd.notna(r) else np.nan
-        mom=np.nan
-        if len(px)>252:
-            try: mom=px.iloc[-1]/px.iloc[-253]-1.0
-            except Exception: mom=np.nan
-        rows.append({"ticker":ticker,"dma_gap":dma_gap,"macd_hist":macd_hist,"rsi_strength":rsi_strength,"mom12m":mom})
+    """
+    Build technical features.
+    Backward-compatible fields are preserved:
+      dma_gap, macd_hist, rsi_strength, mom12m
+    and expanded with:
+      mom6m, mom3m, trend_ema20_50, vol63, drawdown6m
+    """
+    rows = []
+    for ticker, px_raw in price_panel.items():
+        px = pd.to_numeric(px_raw, errors="coerce").dropna()
+        if len(px) < 60:
+            continue
+
+        last = float(px.iloc[-1])
+        ema20 = ema(px, 20)
+        ema50 = ema(px, 50)
+        e20 = float(ema20.iloc[-1]) if len(ema20) else np.nan
+        e50 = float(ema50.iloc[-1]) if len(ema50) else np.nan
+
+        dma_gap = (last - e50) / e50 if pd.notna(e50) and e50 != 0 else np.nan
+        trend_ema20_50 = (e20 / e50 - 1.0) if (pd.notna(e20) and pd.notna(e50) and e50 != 0) else np.nan
+
+        _, _, hist = macd(px)
+        rets = np.log(px).diff().dropna()
+        vol20 = float(rets.tail(20).std(ddof=0)) if rets.size >= 20 else np.nan
+        hist_last = float(hist.iloc[-1]) if hist.size else np.nan
+        if pd.notna(hist_last) and pd.notna(vol20) and vol20 > 1e-9 and last > 0:
+            macd_hist = hist_last / (last * vol20)
+        else:
+            macd_hist = hist_last
+
+        r = rsi(px).iloc[-1] if len(px) > 14 else np.nan
+        rsi_strength = (r - 50.0) / 50.0 if pd.notna(r) else np.nan
+
+        def _mom(days_back: int) -> float:
+            if len(px) <= days_back:
+                return np.nan
+            base = float(px.iloc[-(days_back + 1)])
+            return (last / base - 1.0) if base > 0 else np.nan
+
+        mom12m = _mom(252)
+        mom6m = _mom(126)
+        mom3m = _mom(63)
+
+        vol63 = float(rets.tail(63).std(ddof=1) * np.sqrt(252)) if rets.size >= 20 else np.nan
+        px6 = px.tail(126)
+        if px6.size >= 20:
+            dd6 = px6 / px6.cummax() - 1.0
+            drawdown6m = float(dd6.min())
+        else:
+            drawdown6m = np.nan
+
+        rows.append({
+            "ticker": ticker,
+            "dma_gap": dma_gap,
+            "macd_hist": macd_hist,
+            "rsi_strength": rsi_strength,
+            "mom12m": mom12m,
+            "mom6m": mom6m,
+            "mom3m": mom3m,
+            "trend_ema20_50": trend_ema20_50,
+            "vol63": vol63,
+            "drawdown6m": drawdown6m,
+        })
     return pd.DataFrame(rows).set_index("ticker") if rows else pd.DataFrame()
+
+
+def build_technical_zscores(
+    tech_raw: pd.DataFrame,
+    robust: bool = True,
+    cap: float | None = None,
+) -> pd.DataFrame:
+    if tech_raw is None or tech_raw.empty:
+        return pd.DataFrame()
+    cap = SCORING_CONFIG["z_cap"] if cap is None else cap
+    out = tech_raw.copy()
+
+    for col in TECHNICAL_POSITIVE_FACTORS:
+        if col in out.columns:
+            vals = out[col]
+            z = robust_zscore_series(vals, cap=cap) if robust else zscore_series(vals).clip(-cap, cap)
+            z *= _sample_shrinkage(int(vals.notna().sum()))
+            out[f"{col}_z"] = z
+
+    for col in TECHNICAL_INVERTED_FACTORS:
+        if col in out.columns:
+            vals = -pd.to_numeric(out[col], errors="coerce")
+            z = robust_zscore_series(vals, cap=cap) if robust else zscore_series(vals).clip(-cap, cap)
+            z *= _sample_shrinkage(int(vals.notna().sum()))
+            out[f"{col}_z"] = z
+    return out
+
+
+def build_fundamental_zscores(
+    fund_raw: pd.DataFrame,
+    min_fund_cols: Optional[int] = None,
+    robust: bool = True,
+    cap: float | None = None,
+) -> pd.DataFrame:
+    if fund_raw is None or fund_raw.empty:
+        return pd.DataFrame()
+    min_fund_cols = SCORING_CONFIG["min_fund_cols"] if min_fund_cols is None else int(min_fund_cols)
+    cap = SCORING_CONFIG["z_cap"] if cap is None else cap
+
+    core = [c for c in FUNDAMENTAL_POSITIVE_FACTORS + FUNDAMENTAL_INVERTED_FACTORS if c in fund_raw.columns]
+    filt = fund_raw.copy()
+    if core:
+        required = min(max(1, min_fund_cols), len(core))
+        filt = filt[filt[core].notna().sum(axis=1) >= required]
+    if filt.empty:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(index=filt.index)
+    for col in FUNDAMENTAL_POSITIVE_FACTORS:
+        if col in filt.columns:
+            vals = filt[col]
+            z = robust_zscore_series(vals, cap=cap) if robust else zscore_series(vals).clip(-cap, cap)
+            z *= _sample_shrinkage(int(vals.notna().sum()))
+            out[f"{col}_z"] = z
+
+    for col in FUNDAMENTAL_INVERTED_FACTORS:
+        if col in filt.columns:
+            vals = -pd.to_numeric(filt[col], errors="coerce")
+            z = robust_zscore_series(vals, cap=cap) if robust else zscore_series(vals).clip(-cap, cap)
+            z *= _sample_shrinkage(int(vals.notna().sum()))
+            out[f"{col}_z"] = z
+    return out
+
+
+def _coverage_for_ticker(df: pd.DataFrame, ticker: str, cols: List[str]) -> float:
+    if df is None or df.empty or not cols or ticker not in df.index:
+        return 0.0
+    return float(df.loc[ticker, cols].notna().mean())
+
+
+def _window_return(series: pd.Series, window: int) -> float:
+    if series is None or series.empty or series.size < window + 5:
+        return np.nan
+    end = float(series.iloc[-1])
+    start = float(series.iloc[-window])
+    if start <= 0:
+        return np.nan
+    return end / start - 1.0
+
 
 def macro_from_vix(vix: pd.Series):
     if vix is None or vix.empty:
         return 0.5, np.nan, np.nan, np.nan
-    vix_last=float(vix.iloc[-1])
-    ema20=float(ema(vix,20).iloc[-1]) if len(vix)>=20 else vix_last
-    rel=(vix_last-ema20)/max(ema20,1e-9)
-    if   vix_last<=12: level=1.0
-    elif vix_last>=28: level=0.0
-    else: level = 1.0-(vix_last-12)/16.0
-    if   rel>=0.03: trend=0.0
-    elif rel<=-0.03: trend=1.0
+    vix_last = float(vix.iloc[-1])
+    ema20 = float(ema(vix, 20).iloc[-1]) if len(vix) >= 20 else vix_last
+    rel = (vix_last - ema20) / max(ema20, 1e-9)
+    if vix_last <= 12:
+        level = 1.0
+    elif vix_last >= 28:
+        level = 0.0
     else:
-        trend = 1.0-(rel+0.03)/0.06
-        trend = float(np.clip(trend,0,1))
-    macro=float(np.clip(0.70*level+0.30*trend,0,1))
+        level = 1.0 - (vix_last - 12) / 16.0
+    if rel >= 0.03:
+        trend = 0.0
+    elif rel <= -0.03:
+        trend = 1.0
+    else:
+        trend = float(np.clip(1.0 - (rel + 0.03) / 0.06, 0.0, 1.0))
+    macro = float(np.clip(0.70 * level + 0.30 * trend, 0.0, 1.0))
     return macro, vix_last, ema20, rel
 
-def _scaled_score_from_return(ret: float, positive_is_risk_on: bool) -> float:
+
+def _scaled_score_from_return(ret: float, positive_is_risk_on: bool, scale: float = 0.08) -> float:
+    """
+    Smooth return-to-score mapping via tanh to reduce threshold artifacts.
+    """
     if np.isnan(ret):
-        return 0.5
-    score = float(np.clip((ret + 0.10) / 0.20, 0.0, 1.0))
-    return score if positive_is_risk_on else 1.0 - score
+        return np.nan
+    score = 0.5 + 0.5 * np.tanh(ret / max(scale, 1e-9))
+    return float(score if positive_is_risk_on else 1.0 - score)
+
 
 def macro_from_signals(
     vix: pd.Series,
@@ -468,36 +787,37 @@ def macro_from_signals(
 ):
     vix_score, vix_last, ema20, rel = macro_from_vix(vix)
 
-    def _ret(series: pd.Series) -> float:
-        if series is None or series.empty or series.size < window + 5:
-            return np.nan
-        return float(series.iloc[-1] / series.iloc[-window] - 1.0)
-
-    gold_ret = _ret(gold)
-    dxy_ret = _ret(dxy)
-    credit_ret = _ret(credit_ratio)
+    gold_ret = _window_return(gold, window)
+    dxy_ret = _window_return(dxy, window)
+    credit_ret = _window_return(credit_ratio, window)
 
     if tnx is None or tnx.empty or tnx.size < window + 5:
         tnx_delta = np.nan
     else:
         tnx_delta = float((tnx.iloc[-1] - tnx.iloc[-window]) / 10.0)
 
-    gold_score = _scaled_score_from_return(gold_ret, positive_is_risk_on=False)
-    dxy_score = _scaled_score_from_return(dxy_ret, positive_is_risk_on=False)
-    credit_score = _scaled_score_from_return(credit_ret, positive_is_risk_on=True)
+    gold_score = _scaled_score_from_return(gold_ret, positive_is_risk_on=False, scale=0.08)
+    dxy_score = _scaled_score_from_return(dxy_ret, positive_is_risk_on=False, scale=0.05)
+    credit_score = _scaled_score_from_return(credit_ret, positive_is_risk_on=True, scale=0.06)
+    tnx_score = np.nan if np.isnan(tnx_delta) else float(0.5 + 0.5 * np.tanh((-tnx_delta) / 0.30))
 
-    if np.isnan(tnx_delta):
-        tnx_score = 0.5
+    parts = {
+        "vix": (vix_score, 0.50),
+        "gold": (gold_score, 0.15),
+        "dxy": (dxy_score, 0.15),
+        "tnx": (tnx_score, 0.10),
+        "credit": (credit_score, 0.10),
+    }
+    valid_weight = sum(w for score, w in parts.values() if pd.notna(score))
+    if valid_weight <= 0:
+        macro = 0.5
+        signal_coverage = 0.0
     else:
-        tnx_score = float(np.clip((0.75 - tnx_delta) / 1.5, 0.0, 1.0))
-
-    macro = float(np.clip(
-        0.50 * vix_score + 0.15 * gold_score + 0.15 * dxy_score + 0.10 * tnx_score + 0.10 * credit_score,
-        0, 1
-    ))
+        macro = float(sum(score * w for score, w in parts.values() if pd.notna(score)) / valid_weight)
+        signal_coverage = float(valid_weight / sum(w for _, w in parts.values()))
 
     return {
-        "macro": macro,
+        "macro": float(np.clip(macro, 0.0, 1.0)),
         "vix_last": vix_last,
         "vix_ema20": ema20,
         "vix_gap": rel,
@@ -505,6 +825,100 @@ def macro_from_signals(
         "dxy_ret": dxy_ret,
         "tnx_delta": tnx_delta,
         "credit_ret": credit_ret,
+        "signal_coverage": signal_coverage,
+    }
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def fetch_macro_pack(period: str = "6mo", interval: str = "1d", window: int = 63) -> Dict[str, float]:
+    return macro_from_signals(
+        fetch_vix_series(period=period, interval=interval),
+        fetch_gold_series(period=period, interval=interval),
+        fetch_dxy_series(period=period, interval=interval),
+        fetch_tnx_series(period=period, interval=interval),
+        fetch_credit_ratio_series(period=period, interval=interval),
+        window=window,
+    )
+
+
+def score_universe_panel(
+    panel: Dict[str, pd.Series],
+    target_count: int,
+    macro_pack: Optional[Dict[str, float]] = None,
+    fund_weight: Optional[float] = None,
+    tech_weight: Optional[float] = None,
+    macro_weight: Optional[float] = None,
+    min_fund_cols: Optional[int] = None,
+) -> Dict[str, object]:
+    """
+    Shared scoring engine used across Stock, Portfolio, Tracker, and Battle pages.
+    Returns:
+      out, fund, tech, fund_raw, weights, macro_pack
+    """
+    idx = pd.Index(list(panel.keys()))
+    out = pd.DataFrame(index=idx)
+    if out.empty:
+        return {
+            "out": out,
+            "fund": pd.DataFrame(),
+            "tech": pd.DataFrame(),
+            "fund_raw": pd.DataFrame(),
+            "weights": normalize_score_weights(fund_weight, tech_weight, macro_weight),
+            "macro_pack": macro_pack or {"macro": 0.5, "signal_coverage": 0.0},
+        }
+
+    tech_raw = technical_scores(panel)
+    tech = build_technical_zscores(tech_raw, robust=True, cap=SCORING_CONFIG["z_cap"])
+    tech_cols = [c for c in tech.columns if c.endswith("_z")]
+    tech_score = _component_score(tech[tech_cols]) if tech_cols else pd.Series(dtype=float)
+
+    fund_raw = fetch_fundamentals_simple(list(panel.keys()))
+    fund = build_fundamental_zscores(
+        fund_raw, min_fund_cols=min_fund_cols, robust=True, cap=SCORING_CONFIG["z_cap"]
+    )
+    fund_cols = [c for c in fund.columns if c.endswith("_z")]
+    fund_score = _component_score(fund[fund_cols]) if fund_cols else pd.Series(dtype=float)
+
+    macro_pack = fetch_macro_pack() if macro_pack is None else macro_pack
+    macro_score = float(np.clip(macro_pack.get("macro", 0.5), 0.0, 1.0))
+    macro_cov = float(np.clip(macro_pack.get("signal_coverage", 0.0), 0.0, 1.0))
+
+    out["FUND_score"] = fund_score.reindex(idx)
+    out["TECH_score"] = tech_score.reindex(idx)
+    out["MACRO_score"] = macro_score
+
+    weights = normalize_score_weights(fund_weight, tech_weight, macro_weight)
+    out["COMPOSITE"] = _weighted_row_average(out[["FUND_score", "TECH_score", "MACRO_score"]], weights)
+    ratings = percentile_rank(out["COMPOSITE"].dropna())
+    out["RATING_0_100"] = ratings.reindex(out.index)
+    out["RECO"] = out["RATING_0_100"].apply(score_label)
+
+    peer_loaded = int(out["COMPOSITE"].notna().sum())
+    peer_factor = float(np.clip(peer_loaded / max(target_count, 1), 0.0, 1.0))
+    depth_factor = float(np.clip(math.sqrt(peer_loaded / max(min(target_count, 60), 1)), 0.0, 1.0))
+    component_cov = out[["FUND_score", "TECH_score", "MACRO_score"]].notna().mean(axis=1).fillna(0.0)
+    confidence = []
+    for t in out.index:
+        fund_cov = _coverage_for_ticker(fund, t, fund_cols)
+        tech_cov = _coverage_for_ticker(tech, t, tech_cols)
+        comp_cov = float(component_cov.loc[t]) if t in component_cov.index else 0.0
+        conf = 100.0 * (
+            0.30 * peer_factor
+            + 0.15 * depth_factor
+            + 0.25 * fund_cov
+            + 0.20 * tech_cov
+            + 0.10 * macro_cov * comp_cov
+        )
+        confidence.append(float(np.clip(conf, 0.0, 100.0)))
+    out["CONFIDENCE"] = confidence
+
+    return {
+        "out": out,
+        "fund": fund,
+        "tech": tech,
+        "fund_raw": fund_raw,
+        "weights": weights,
+        "macro_pack": macro_pack,
     }
 
 
@@ -1160,14 +1574,18 @@ __all__ = [
     # UI
     "inject_css","brand_header","topbar_back","inline_logo_svg",
     # helpers
-    "yf_symbol","ema","rsi","macd","zscore_series","percentile_rank",
+    "yf_symbol","ema","rsi","macd","zscore_series","robust_zscore_series","percentile_rank",
     # loaders & universes
     "fetch_prices_chunked_with_fallback","fetch_vix_series","fetch_gold_series","fetch_dxy_series",
     "fetch_tnx_series","fetch_credit_ratio_series","fetch_fundamentals_simple","fetch_sector",
     "build_universe","PEER_CATALOG","set_peer_catalog",
     # scoring
     "SCORING_CONFIG","score_label",
-    "technical_scores","macro_from_vix","macro_from_signals","fundamentals_interpretation",
+    "FACTOR_LABELS",
+    "technical_scores","build_technical_zscores","build_fundamental_zscores",
+    "normalize_score_weights","score_universe_panel",
+    "weighted_series_mean","portfolio_signal_score",
+    "macro_from_vix","macro_from_signals","fetch_macro_pack","fundamentals_interpretation",
     # portfolio editor
     "CURRENCY_MAP","holdings_editor_form",
     # statements & metrics

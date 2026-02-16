@@ -6,10 +6,8 @@ from datetime import datetime
 from db import ensure_db, get_current_user_from_state, signup, login, list_portfolios, load_holdings, upsert_portfolio, delete_portfolio
 from app_utils import (
     inject_css, brand_header, yf_symbol, fetch_prices_chunked_with_fallback,
-    technical_scores, fetch_fundamentals_simple, zscore_series,
-    fetch_vix_series, fetch_gold_series, fetch_dxy_series, fetch_tnx_series,
-    fetch_credit_ratio_series, macro_from_signals, fetch_sector,
-    SCORING_CONFIG, score_label, build_universe
+    fetch_macro_pack, score_universe_panel, fetch_sector,
+    SCORING_CONFIG, score_label, build_universe, FACTOR_LABELS, portfolio_signal_score
 )
 
 st.set_page_config(page_title="Portfolio Tracker", layout="wide")
@@ -139,16 +137,6 @@ if port.empty:
     st.info("Add at least one holding to track.")
     st.stop()
 
-def _cap_z(s: pd.Series, cap: float | None = None) -> pd.Series:
-    cap = SCORING_CONFIG["z_cap"] if cap is None else cap
-    return s.clip(-cap, cap)
-
-def _composite_row(row: pd.Series, weights: dict) -> float:
-    total = sum(w for k, w in weights.items() if pd.notna(row.get(k)))
-    if total == 0:
-        return np.nan
-    return float(sum(row.get(k) * w for k, w in weights.items() if pd.notna(row.get(k))) / total)
-
 tickers = port["Ticker"].tolist()
 shares = port.set_index("Ticker")["Shares"].fillna(0.0)
 
@@ -208,53 +196,57 @@ weights_by_value = (latest * shares).fillna(0.0)
 weights = (weights_by_value / (weights_by_value.sum() or 1)).rename("weight")
 
 panel_all = {t: prices[t].dropna() for t in tickers if t in prices}
-tech_all = technical_scores(panel_all)
-for col in ["dma_gap","macd_hist","rsi_strength","mom12m"]:
-    if col in tech_all.columns: tech_all[f"{col}_z"] = _cap_z(zscore_series(tech_all[col]))
-TECH_score_all = tech_all[[c for c in ["dma_gap_z","macd_hist_z","rsi_strength_z","mom12m_z"] if c in tech_all.columns]].mean(axis=1)
+score_universe, score_label_txt = build_universe(tickers, "Auto by index membership", 140, "")
+score_prices, score_ok = fetch_prices_chunked_with_fallback(
+    score_universe, period="1y", interval="1d", chunk=20, retries=3, sleep_between=0.35, singles_pause=0.25
+)
+score_panel = {
+    t: score_prices[t].dropna()
+    for t in score_ok
+    if t in score_prices.columns and score_prices[t].dropna().size > 0
+}
+if not score_panel:
+    score_panel = panel_all
+    score_label_txt = "Holdings only (fallback)"
 
-fund_raw_all = fetch_fundamentals_simple(list(panel_all.keys()))
-core_fund = [
-    "revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
-    "profitMargins","grossMargins","operatingMargins","ebitdaMargins","fcfYield",
-    "trailingPE","forwardPE","enterpriseToEbitda","debtToEquity"
-]
-core_present = [c for c in core_fund if c in fund_raw_all.columns]
-if core_present:
-    min_fund_cols = SCORING_CONFIG["min_fund_cols"]
-    fund_raw_all = fund_raw_all[fund_raw_all[core_present].notna().sum(axis=1) >= min_fund_cols]
-fdf_all = pd.DataFrame(index=fund_raw_all.index)
-for col in ["revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
-            "profitMargins","grossMargins","operatingMargins","ebitdaMargins","fcfYield"]:
-    if col in fund_raw_all.columns: fdf_all[f"{col}_z"]=_cap_z(zscore_series(fund_raw_all[col]))
-for col in ["trailingPE","forwardPE","enterpriseToEbitda","debtToEquity"]:
-    if col in fund_raw_all.columns: fdf_all[f"{col}_z"]=_cap_z(zscore_series(-fund_raw_all[col]))
-FUND_score_all = fdf_all.mean(axis=1) if len(fdf_all.columns) else pd.Series(dtype=float)
+macro_pack = fetch_macro_pack(period="6mo", interval="1d")
+score_pack = score_universe_panel(
+    score_panel,
+    target_count=max(len(score_universe), len(score_panel), 1),
+    macro_pack=macro_pack,
+    min_fund_cols=SCORING_CONFIG["min_fund_cols"],
+)
+out_all = score_pack["out"]
+fdf_all = score_pack["fund"]
+tech_all = score_pack["tech"]
+MACRO = float(macro_pack["macro"])
+if out_all.empty:
+    st.error("Unable to compute live score from the current market data.")
+    st.stop()
 
-vix_series = fetch_vix_series(period="6mo", interval="1d")
-gold_series = fetch_gold_series(period="6mo", interval="1d")
-dxy_series = fetch_dxy_series(period="6mo", interval="1d")
-tnx_series = fetch_tnx_series(period="6mo", interval="1d")
-credit_series = fetch_credit_ratio_series(period="6mo", interval="1d")
-MACRO = macro_from_signals(vix_series, gold_series, dxy_series, tnx_series, credit_series)["macro"]
+tmp = out_all.reindex(tickers)[["FUND_score", "TECH_score", "MACRO_score", "COMPOSITE", "CONFIDENCE"]].copy()
+tmp = tmp.join(weights, how="left").fillna({"weight": 0.0})
+missing_for_score = [t for t in tickers if t not in out_all.index]
+if missing_for_score:
+    st.caption("Scoring fallback excluded: " + ", ".join(missing_for_score))
 
-idx_all = pd.Index(list(panel_all.keys()))
-tmp = pd.DataFrame(index=idx_all)
-tmp["FUND"] = FUND_score_all.reindex(idx_all)
-tmp["TECH"] = TECH_score_all.reindex(idx_all)
-tmp["MACRO"] = MACRO
-wsum = sum(SCORING_CONFIG["weights"].values()) or 1.0
-wf = SCORING_CONFIG["weights"]["fund"] / wsum
-wt = SCORING_CONFIG["weights"]["tech"] / wsum
-wm = SCORING_CONFIG["weights"]["macro"] / wsum
-comp_weights = {"FUND": wf, "TECH": wt, "MACRO": wm}
-tmp["COMP"] = tmp.apply(_composite_row, axis=1, weights=comp_weights)
-tmp = tmp.join(weights, how="left").fillna({"weight":0.0})
-live_signal = float((tmp["COMP"]*tmp["weight"]).sum())
-live_score = float(np.clip((live_signal+1)/2, 0, 1)*100)
+live_pack = portfolio_signal_score(
+    out_all["COMPOSITE"],
+    tmp["COMPOSITE"],
+    tmp["weight"],
+    diversification=None,
+)
+live_signal = float(live_pack["signal"]) if pd.notna(live_pack["signal"]) else np.nan
+live_pct = float(live_pack["signal_percentile"]) if pd.notna(live_pack["signal_percentile"]) else np.nan
+live_score = float(live_pack["final_score"]) if pd.notna(live_pack["final_score"]) else np.nan
+if pd.isna(live_score):
+    st.error("Portfolio score unavailable due to missing holdings factor coverage.")
+    st.stop()
 
 st.markdown("### 🔮 Live ‘Rate My Portfolio’ Score")
 st.metric("Portfolio Score (0–100)", f"{live_score:.1f}")
+st.caption(f"Live score peer set: {score_label_txt}.")
+st.caption(f"Signal percentile vs peers: {live_pct:.1f} (weighted composite {live_signal:.3f}).")
 st.caption(
     f"Interpretation: **{score_label(live_score)}**. "
     "80+ strong, 60–79 buy, 40–59 hold, 20–39 sell, <20 strong sell."
@@ -291,28 +283,9 @@ with st.expander("How to read this tracker score"):
     st.markdown(
         "- **Fundamentals** and **Technicals** are peer‑relative z‑scores. Positive = stronger vs peers.  \n"
         "- **Macro** is a regime overlay (VIX, USD, rates, credit, gold) and is the same for all holdings.  \n"
-        "- This tracker score is a live snapshot using current weights; use **Rate My Portfolio** for deeper analysis."
+        "- Score is based on your weighted signal percentile within the selected peer universe.  \n"
+        "- This tracker score is a live snapshot; use **Rate My Portfolio** for deeper analysis."
     )
-
-FACTOR_LABELS = {
-    "revenueGrowth_z": "Revenue growth",
-    "earningsGrowth_z": "Earnings growth",
-    "returnOnEquity_z": "ROE",
-    "returnOnAssets_z": "ROA",
-    "profitMargins_z": "Profit margin",
-    "grossMargins_z": "Gross margin",
-    "operatingMargins_z": "Operating margin",
-    "ebitdaMargins_z": "EBITDA margin",
-    "fcfYield_z": "FCF yield",
-    "trailingPE_z": "P/E (lower is better)",
-    "forwardPE_z": "Forward P/E (lower is better)",
-    "enterpriseToEbitda_z": "EV/EBITDA (lower is better)",
-    "debtToEquity_z": "Debt/Equity (lower is better)",
-    "dma_gap_z": "Price vs EMA50",
-    "macd_hist_z": "MACD momentum",
-    "rsi_strength_z": "RSI strength",
-    "mom12m_z": "12m momentum",
-}
 
 def _weighted_mean_z(df: pd.DataFrame, weights: pd.Series) -> pd.Series:
     if df.empty:
@@ -361,29 +334,14 @@ else:
             prog.progress(60)
 
             msg.info("Step 3/3: scoring candidates on weak factors.")
-            tech_c = technical_scores(panel_c)
-            for col in ["dma_gap","macd_hist","rsi_strength","mom12m"]:
-                if col in tech_c.columns:
-                    tech_c[f"{col}_z"] = _cap_z(zscore_series(tech_c[col]))
-
-            fund_c = fetch_fundamentals_simple(list(panel_c.keys()))
-            core_fund = [
-                "revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
-                "profitMargins","grossMargins","operatingMargins","ebitdaMargins","fcfYield",
-                "trailingPE","forwardPE","enterpriseToEbitda","debtToEquity"
-            ]
-            core_present = [c for c in core_fund if c in fund_c.columns]
-            if core_present:
-                min_fund_cols = SCORING_CONFIG["min_fund_cols"]
-                fund_c = fund_c[fund_c[core_present].notna().sum(axis=1) >= min_fund_cols]
-
-            fdf_c = pd.DataFrame(index=fund_c.index)
-            for col in ["revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
-                        "profitMargins","grossMargins","operatingMargins","ebitdaMargins","fcfYield"]:
-                if col in fund_c.columns: fdf_c[f"{col}_z"]=_cap_z(zscore_series(fund_c[col]))
-            for col in ["trailingPE","forwardPE","enterpriseToEbitda","debtToEquity"]:
-                if col in fund_c.columns: fdf_c[f"{col}_z"]=_cap_z(zscore_series(-fund_c[col]))
-
+            cand_pack = score_universe_panel(
+                panel_c,
+                target_count=max(len(candidates), len(panel_c), 1),
+                macro_pack=macro_pack,
+                min_fund_cols=SCORING_CONFIG["min_fund_cols"],
+            )
+            fdf_c = cand_pack["fund"]
+            tech_c = cand_pack["tech"]
             cand = pd.concat([fdf_c, tech_c[[c for c in tech_c.columns if c.endswith("_z")]]], axis=1)
             use_cols = [c for c in weak_factors.index if c in cand.columns]
             if use_cols:

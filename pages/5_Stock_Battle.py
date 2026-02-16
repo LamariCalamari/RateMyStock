@@ -5,31 +5,14 @@ import streamlit as st
 
 from app_utils import (
     inject_css, brand_header, yf_symbol, fetch_prices_chunked_with_fallback,
-    fetch_fundamentals_simple, technical_scores, zscore_series, percentile_rank,
-    fetch_vix_series, fetch_gold_series, fetch_dxy_series, fetch_tnx_series,
-    fetch_credit_ratio_series, macro_from_signals, build_universe,
-    SCORING_CONFIG, score_label
+    fetch_macro_pack, score_universe_panel, build_universe,
+    SCORING_CONFIG, score_label, FACTOR_LABELS
 )
 
 st.set_page_config(page_title="Stock Battle", layout="wide")
 inject_css()
 brand_header("Stock Battle")
 st.caption("Compare two stocks or a stock vs an index with the same scoring system.")
-
-def _cap_z(s: pd.Series, cap: float | None = None) -> pd.Series:
-    cap = SCORING_CONFIG["z_cap"] if cap is None else cap
-    return s.clip(-cap, cap)
-
-def _composite_row(row: pd.Series, weights: dict) -> float:
-    total = sum(w for k, w in weights.items() if pd.notna(row.get(k)))
-    if total == 0:
-        return np.nan
-    return float(sum(row.get(k) * w for k, w in weights.items() if pd.notna(row.get(k))) / total)
-
-def _coverage(df: pd.DataFrame, ticker: str, cols: list[str]) -> float:
-    if not cols or ticker not in df.index:
-        return 0.0
-    return float(df.loc[ticker, cols].notna().mean())
 
 def _risk_stats(px: pd.Series) -> dict:
     if px is None or px.dropna().empty:
@@ -140,7 +123,7 @@ if not st.session_state.get("battle_ready"):
 peer_n_eff = min(peer_n, 120) if fast_mode else peer_n
 mode = index_choice if battle_mode == "Stock vs Index" else universe_mode
 
-def _compute_universe(tickers: list[str], mode: str, macro_value: float) -> dict:
+def _compute_universe(tickers: list[str], mode: str, macro_pack: dict) -> dict:
     universe, label = build_universe(tickers, mode, peer_n_eff, "")
     target_count = peer_n_eff if mode != "Custom (paste list)" else len(universe)
     prices, ok = fetch_prices_chunked_with_fallback(
@@ -150,54 +133,20 @@ def _compute_universe(tickers: list[str], mode: str, macro_value: float) -> dict
     if not ok:
         return {"ok": False}
     panel = {t: prices[t].dropna() for t in ok if t in prices.columns and prices[t].dropna().size > 0}
-    tech = technical_scores(panel)
-    for col in ["dma_gap", "macd_hist", "rsi_strength", "mom12m"]:
-        if col in tech.columns:
-            tech[f"{col}_z"] = _cap_z(zscore_series(tech[col]))
-    TECH_score = tech[[c for c in ["dma_gap_z","macd_hist_z","rsi_strength_z","mom12m_z"] if c in tech.columns]].mean(axis=1)
-
-    fund_raw = fetch_fundamentals_simple(list(panel.keys()))
-    core_fund = [
-        "revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
-        "profitMargins","grossMargins","operatingMargins","ebitdaMargins","fcfYield",
-        "trailingPE","forwardPE","enterpriseToEbitda","debtToEquity"
-    ]
-    core_present = [c for c in core_fund if c in fund_raw.columns]
-    if core_present:
-        min_fund_cols = SCORING_CONFIG["min_fund_cols"]
-        fund_raw = fund_raw[fund_raw[core_present].notna().sum(axis=1) >= min_fund_cols]
-    fdf = pd.DataFrame(index=fund_raw.index)
-    for col in ["revenueGrowth","earningsGrowth","returnOnEquity","returnOnAssets",
-                "profitMargins","grossMargins","operatingMargins","ebitdaMargins","fcfYield"]:
-        if col in fund_raw.columns:
-            fdf[f"{col}_z"] = _cap_z(zscore_series(fund_raw[col]))
-    for col in ["trailingPE","forwardPE","enterpriseToEbitda","debtToEquity"]:
-        if col in fund_raw.columns:
-            fdf[f"{col}_z"] = _cap_z(zscore_series(-fund_raw[col]))
-    FUND_score = fdf.mean(axis=1) if len(fdf.columns) else pd.Series(dtype=float)
-
-    idx = pd.Index(list(panel.keys()))
-    out = pd.DataFrame(index=idx)
-    out["FUND_score"] = FUND_score.reindex(idx)
-    out["TECH_score"] = TECH_score.reindex(idx)
-    out["MACRO_score"] = macro_value
-
-    wsum = (w_f + w_t + w_m) or 1.0
-    wf, wt, wm = w_f / wsum, w_t / wsum, w_m / wsum
-    weights = {"FUND_score": wf, "TECH_score": wt, "MACRO_score": wm}
-    out["COMPOSITE"] = out.apply(_composite_row, axis=1, weights=weights)
-    ratings = percentile_rank(out["COMPOSITE"].dropna())
-    out["RATING_0_100"] = ratings.reindex(out.index)
-    out["RECO"] = out["RATING_0_100"].apply(score_label)
-
-    tech_cols = [c for c in tech.columns if c.endswith("_z")]
-    fund_cols = [c for c in fdf.columns if c.endswith("_z")]
-    peer_factor = min(len(out["COMPOSITE"].dropna()) / max(target_count, 1), 1.0)
-    cw = SCORING_CONFIG["confidence_weights"]
-    out["CONFIDENCE"] = [
-        100.0 * (cw["peer"] * peer_factor + cw["fund"] * _coverage(fdf, t, fund_cols) + cw["tech"] * _coverage(tech, t, tech_cols))
-        for t in out.index
-    ]
+    if not panel:
+        return {"ok": False}
+    score_pack = score_universe_panel(
+        panel,
+        target_count=target_count,
+        macro_pack=macro_pack,
+        fund_weight=w_f,
+        tech_weight=w_t,
+        macro_weight=w_m,
+        min_fund_cols=SCORING_CONFIG["min_fund_cols"],
+    )
+    out = score_pack["out"]
+    fdf = score_pack["fund"]
+    tech = score_pack["tech"]
 
     return {
         "ok": True,
@@ -214,27 +163,22 @@ with st.status("Building comparison...", expanded=True) as status:
     msg = st.empty()
 
     msg.info("Step 1/3: loading macro regime.")
-    vix_series = fetch_vix_series(period="6mo", interval="1d")
-    gold_series = fetch_gold_series(period="6mo", interval="1d")
-    dxy_series = fetch_dxy_series(period="6mo", interval="1d")
-    tnx_series = fetch_tnx_series(period="6mo", interval="1d")
-    credit_series = fetch_credit_ratio_series(period="6mo", interval="1d")
-    macro_value = macro_from_signals(vix_series, gold_series, dxy_series, tnx_series, credit_series)["macro"]
+    macro_pack = fetch_macro_pack(period="6mo", interval="1d")
     prog.progress(20)
 
     if basis == "Each vs own peers (fair cross‑industry)" and battle_mode == "Stock vs Stock":
         msg.info("Step 2/3: building peers + signals for Stock A.")
         if universe_mode != "Industry (auto fallback)":
             st.caption("Using industry/sector fallback for fair comparison.")
-        res_a = _compute_universe([ticker_a], "Industry (auto fallback)", macro_value)
+        res_a = _compute_universe([ticker_a], "Industry (auto fallback)", macro_pack)
         prog.progress(60)
         msg.info("Step 3/3: building peers + signals for Stock B.")
-        res_b = _compute_universe([ticker_b], "Industry (auto fallback)", macro_value)
+        res_b = _compute_universe([ticker_b], "Industry (auto fallback)", macro_pack)
         prog.progress(100)
         status.update(label="Done!", state="complete")
     else:
         msg.info("Step 2/3: building peers + signals.")
-        res_all = _compute_universe(user_tickers, mode, macro_value)
+        res_all = _compute_universe(user_tickers, mode, macro_pack)
         prog.progress(100)
         status.update(label="Done!", state="complete")
 
@@ -369,25 +313,7 @@ else:
         st.success(f"{ticker_a} is {msg} the index median by {abs(delta):.1f} points.")
 
 st.markdown("### Factor comparison")
-factor_map = {
-    "revenueGrowth_z": "Revenue growth",
-    "earningsGrowth_z": "Earnings growth",
-    "returnOnEquity_z": "ROE",
-    "returnOnAssets_z": "ROA",
-    "profitMargins_z": "Profit margin",
-    "grossMargins_z": "Gross margin",
-    "operatingMargins_z": "Operating margin",
-    "ebitdaMargins_z": "EBITDA margin",
-    "fcfYield_z": "FCF yield",
-    "trailingPE_z": "P/E (lower is better)",
-    "forwardPE_z": "Forward P/E (lower is better)",
-    "enterpriseToEbitda_z": "EV/EBITDA (lower is better)",
-    "debtToEquity_z": "Debt/Equity (lower is better)",
-    "dma_gap_z": "Price vs EMA50",
-    "macd_hist_z": "MACD momentum",
-    "rsi_strength_z": "RSI strength",
-    "mom12m_z": "12m momentum",
-}
+factor_map = FACTOR_LABELS
 
 def _z_val(df: pd.DataFrame, t: str, col: str) -> float:
     if t in df.index and col in df.columns and pd.notna(df.loc[t, col]):
