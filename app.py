@@ -118,7 +118,13 @@ with c3:
     st.markdown('</div>', unsafe_allow_html=True)
 
 c4, c5, c6 = st.columns([1,1,1], gap="large")
-with c5:
+with c4:
+    st.markdown('<div class="cta dark">', unsafe_allow_html=True)
+    if st.button("🧭  Build My Portfolio", use_container_width=True, key="cta_builder"):
+        st.switch_page("pages/4_Build_My_Portfolio.py")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with c6:
     st.markdown('<div class="cta dark">', unsafe_allow_html=True)
     if st.button("⚔️  Stock Battle", use_container_width=True, key="cta_battle"):
         st.switch_page("pages/5_Stock_Battle.py")
@@ -131,4 +137,3 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.page_link("pages/6_Methodology.py", label="📚 Methodology & Scoring Guide")
-st.page_link("pages/5_Stock_Battle.py", label="⚔️ Stock Battle")

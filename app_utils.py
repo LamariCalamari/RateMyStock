@@ -221,6 +221,22 @@ def fetch_prices_chunked_with_fallback(
 
     frames, ok = [], []
 
+    def _sanitize_index(s: pd.Series) -> pd.Series:
+        if not isinstance(s, pd.Series) or s.empty:
+            return s
+        out = s.copy()
+        idx = out.index
+        if isinstance(idx, pd.DatetimeIndex):
+            if idx.tz is not None:
+                out.index = idx.tz_convert(None)
+        else:
+            try:
+                out.index = pd.to_datetime(idx, errors="coerce")
+                out = out[~out.index.isna()]
+            except Exception:
+                return out
+        return out.sort_index()
+
     # Pass 1 — singles
     missing = names[:]
     for _ in range(retries):
@@ -233,7 +249,7 @@ def fetch_prices_chunked_with_fallback(
                 if isinstance(df, pd.DataFrame) and "Close" in df:
                     s=df["Close"].dropna()
                     if s.size:
-                        frames.append(s.rename(t)); ok.append(t)
+                        frames.append(_sanitize_index(s).rename(t)); ok.append(t)
                     else: new_missing.append(t)
                 else: new_missing.append(t)
             except Exception:
@@ -248,13 +264,13 @@ def fetch_prices_chunked_with_fallback(
             t0=group[0]
             if "Close" in df:
                 s=df["Close"].dropna()
-                if s.size: frames.append(s.rename(t0)); ok.append(t0)
+                if s.size: frames.append(_sanitize_index(s).rename(t0)); ok.append(t0)
             return
         got=set(df.columns.get_level_values(0))
         for t in group:
             if t in got:
                 s=df[t]["Close"].dropna()
-                if s.size: frames.append(s.rename(t)); ok.append(t)
+                if s.size: frames.append(_sanitize_index(s).rename(t)); ok.append(t)
 
     if missing:
         for i in range(0, len(missing), chunk):
@@ -276,7 +292,7 @@ def fetch_prices_chunked_with_fallback(
             try:
                 h=yf.Ticker(t).history(period=period, interval=interval, auto_adjust=True)
                 if isinstance(h,pd.DataFrame) and "Close" in h and not h["Close"].dropna().empty:
-                    frames.append(h["Close"].dropna().rename(t)); ok.append(t)
+                    frames.append(_sanitize_index(h["Close"].dropna()).rename(t)); ok.append(t)
             except Exception:
                 pass
             time.sleep(singles_pause + random.uniform(0.1,0.35))

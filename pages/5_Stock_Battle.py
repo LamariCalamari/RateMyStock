@@ -147,6 +147,9 @@ def _compute_universe(tickers: list[str], mode: str, macro_pack: dict) -> dict:
     out = score_pack["out"]
     fdf = score_pack["fund"]
     tech = score_pack["tech"]
+    required = {"FUND_score", "TECH_score", "MACRO_score", "COMPOSITE", "RATING_0_100", "RECO", "CONFIDENCE"}
+    if out.empty or not required.issubset(set(out.columns)):
+        return {"ok": False}
 
     return {
         "ok": True,
@@ -235,13 +238,19 @@ def _summary_row(ticker: str, out_df: pd.DataFrame, panel_dict: dict) -> dict:
     row = out_df.loc[ticker]
     px = panel_dict.get(ticker)
     risk = _risk_stats(px)
+    score = pd.to_numeric(row.get("RATING_0_100", np.nan), errors="coerce")
+    fund = pd.to_numeric(row.get("FUND_score", np.nan), errors="coerce")
+    tech = pd.to_numeric(row.get("TECH_score", np.nan), errors="coerce")
+    macro = pd.to_numeric(row.get("MACRO_score", np.nan), errors="coerce")
+    conf = pd.to_numeric(row.get("CONFIDENCE", np.nan), errors="coerce")
+    reco = row.get("RECO", "N/A")
     return {
-        "Score": float(row["RATING_0_100"]),
-        "Recommendation": row["RECO"],
-        "Fundamentals": float(row["FUND_score"]),
-        "Technicals": float(row["TECH_score"]),
-        "Macro": float(row["MACRO_score"]),
-        "Confidence": float(row["CONFIDENCE"]),
+        "Score": float(score) if pd.notna(score) else np.nan,
+        "Recommendation": str(reco),
+        "Fundamentals": float(fund) if pd.notna(fund) else np.nan,
+        "Technicals": float(tech) if pd.notna(tech) else np.nan,
+        "Macro": float(macro) if pd.notna(macro) else np.nan,
+        "Confidence": float(conf) if pd.notna(conf) else np.nan,
         "1y Return": risk["ret"],
         "Volatility": risk["vol"],
         "Max Drawdown": risk["mdd"],
