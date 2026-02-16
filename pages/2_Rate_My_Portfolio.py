@@ -13,7 +13,10 @@ st.set_page_config(page_title="Rate My Portfolio", layout="wide")
 inject_css()
 brand_header("Rate My Portfolio")
 st.page_link("pages/5_Stock_Battle.py", label="Compare holdings in Stock Battle")
-st.page_link("pages/4_Build_My_Portfolio.py", label="Need a starter plan? Build My Portfolio")
+try:
+    st.page_link("pages/4_Build_My_Portfolio.py", label="Need a starter plan? Build My Portfolio")
+except Exception:
+    st.info("Build My Portfolio page was added recently. Restart Streamlit to refresh the page list.")
 
 CURRENCY_MAP = {"$":"USD","€":"EUR","£":"GBP","CHF":"CHF","C$":"CAD","A$":"AUD","¥":"JPY"}
 def _safe_num(x): return pd.to_numeric(x, errors="coerce")
