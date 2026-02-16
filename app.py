@@ -130,5 +130,5 @@ st.markdown(
     "<div style='text-align:center;color:#9aa0a6;'>Your portfolios are saved to a local SQLite DB when signed in.</div>",
     unsafe_allow_html=True,
 )
-st.page_link("pages/4_Methodology.py", label="📚 Methodology & Scoring Guide")
+st.page_link("pages/6_Methodology.py", label="📚 Methodology & Scoring Guide")
 st.page_link("pages/5_Stock_Battle.py", label="⚔️ Stock Battle")
